@@ -12,6 +12,11 @@ used by Codex.
 > remote SSH/ProxyJump/terminal lab run are still required before calling this a
 > production replacement for an SSH workflow.
 
+The current Rolling Pre-release is available at
+<https://github.com/Cherrling/CodexDeck/releases/tag/rolling>. Download
+`codex-android-latest.apk` for the newest automated build and verify it with the
+published `SHA256SUMS`.
+
 ## Highlights
 
 - Kotlin, Jetpack Compose, Material 3, Coroutines/Flow, Room, and Android Keystore.
@@ -223,6 +228,11 @@ Android SDK files and generated APKs are deliberately not cached.
 5. uploads versioned and fixed-name APKs, `SHA256SUMS`, and `build-info.json`;
 6. moves only the fixed `rolling` Tag after the build succeeds;
 7. updates the single `Rolling Pre-release` Release and removes stale APK assets.
+
+The current release pipeline has been exercised end to end: CI passed, the fixed
+`rolling` tag and Release were updated, version/versionCode and Beijing time were
+verified, both APK names were byte-identical, SHA256 and APK signatures passed, and
+subsequent runs hit the Gradle, Docker, and debug-keystore caches.
 
 ### Release signing secrets
 

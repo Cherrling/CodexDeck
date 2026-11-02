@@ -123,8 +123,10 @@ Researched revisions:
 | Bounded memory and streaming performance | Implemented | LRU views, Turn limit, field/queue/frame bounds, batched deltas, LazyColumn stable keys. |
 | Foreground connection service | Implemented, device-unverified | Data-sync service with one low-importance notification, Disconnect action, and API 35 timeout handling; no wakelock or polling. |
 | Automatic last Host/Thread restore | Implemented, device-unverified | Persisted non-secret restore marker; Android process death and notification permission behavior need device tests. |
-| Main CI on PR/push | Implemented, remote-unverified | `.github/workflows/ci.yml` runs protocol/app/terminal tests, Docker OpenSSH/ProxyJump/PTY, lint, and APK build. |
-| Rolling pre-release workflow | Implemented, remote-unverified | Single `rolling` tag/release, debug fallback when signing secrets are absent, versioned + `latest` APK, SHA256, build info, rollback checkpoint, and post-publish verification. |
+| Main CI on push | Verified | GitHub run `41511422653` passed protocol/app/terminal tests, Docker OpenSSH/ProxyJump/PTY, lint, APK build/signature verification, and artifact upload. |
+| Pull Request CI | Implemented, event-unverified | The workflow declares `pull_request`; no external PR event has run yet. The same job path passed on `main`. |
+| Rolling pre-release workflow | Verified | Runs `41510727317`, `41512239111`, and `41512833496` updated the single public `rolling` Pre-release with matching Commit, Beijing time, monotonic versionCode, byte-identical APKs, SHA256, and verified signatures. |
+| GitHub Actions cache reuse | Verified | Logs show restored Node/Gradle caches, `FROM-CACHE` tasks, Docker `CACHED`/GHA manifest import, and a subsequent `codexdeck-rolling-debug-keystore-v1` cache hit with unchanged certificate SHA-256. |
 | Android device E2E | Not verified | No emulator or physical device in the current environment. |
 | External production SSH/ProxyJump/WebSocket-tunnel E2E | Partial | Real isolated Docker OpenSSH two-hop test passes; production DNS/firewall/TLS/TUI validation remains pending. |
 
@@ -135,6 +137,8 @@ Researched revisions:
   `versionCode` and Commit.
 - A debug fallback is explicitly named and uses `.debug`; it cannot update a
   release-signed installation.
+- GitHub Actions cache eviction can remove the debug keystore; configure release signing
+  secrets for an identity that does not depend on cache retention.
 - There is no cross-device credential export/backup. Keystore loss intentionally makes
   encrypted credentials unrecoverable.
 - Room migration files are checked manually/exported; no instrumentation migration test
