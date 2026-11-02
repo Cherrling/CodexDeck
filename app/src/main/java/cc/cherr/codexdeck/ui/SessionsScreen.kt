@@ -18,6 +18,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -60,7 +61,9 @@ fun SessionsScreen(
                 "${it.label} · ${state.threads.count { thread -> thread.status.isActive }} 个运行中"
             } ?: "连接服务器后读取远端 Thread 列表",
             trailing = {
-                if (state.connectionPhase == ConnectionPhase.CONNECTED) {
+                if (state.connectionPhase == ConnectionPhase.CONNECTED &&
+                    !state.showArchivedThreads
+                ) {
                     IconButton(onClick = {
                         onNewThread(projects.firstOrNull()?.path.orEmpty())
                     }) {
@@ -112,20 +115,47 @@ fun SessionsScreen(
             placeholder = { Text("搜索标题、工作目录或预览") },
             shape = RoundedCornerShape(18.dp),
         )
-        if (projects.isEmpty()) {
-            EmptyPanel(
-                title = if (state.threadSearch.isBlank()) "没有 Codex 会话" else "没有匹配的会话",
-                detail = if (state.threadSearch.isBlank()) {
-                    "在任意项目下新建 Thread。模型与推理强度从远端 model/list 动态读取。"
-                } else {
-                    "清空搜索词或换一个关键词。"
-                },
-                modifier = Modifier.padding(16.dp),
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FilterChip(
+                selected = state.showArchivedThreads,
+                onClick = controller::toggleArchivedThreads,
+                label = { Text("归档会话") },
             )
-            Button(
-                onClick = { onNewThread("") },
-                modifier = Modifier.padding(horizontal = 16.dp),
-            ) { Text("新建会话") }
+            Text(
+                "${state.threads.size} 个已载入",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (state.isLoadingThreads && state.threads.isEmpty()) {
+            LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+        }
+        if (projects.isEmpty()) {
+            if (!state.isLoadingThreads) {
+                EmptyPanel(
+                    title = when {
+                        state.threadSearch.isNotBlank() -> "没有匹配的会话"
+                        state.showArchivedThreads -> "没有归档会话"
+                        else -> "没有 Codex 会话"
+                    },
+                    detail = if (state.threadSearch.isBlank()) {
+                        "在任意项目下新建 Thread。模型与推理强度从远端 model/list 动态读取。"
+                    } else {
+                        "清空搜索词或换一个关键词。"
+                    },
+                    modifier = Modifier.padding(16.dp),
+                )
+                if (!state.showArchivedThreads) {
+                    Button(
+                        onClick = { onNewThread("") },
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    ) { Text("新建会话") }
+                }
+            }
             return@Column
         }
         LazyColumn(
@@ -146,6 +176,22 @@ fun SessionsScreen(
                     onNewThread = { onNewThread(project.path) },
                     onOpenThread = { controller.openThread(it.id) },
                 )
+            }
+            if (state.threadNextCursor != null || state.isLoadingThreads) {
+                item(key = "thread-pagination") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        if (state.isLoadingThreads) {
+                            LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 24.dp))
+                        } else {
+                            TextButton(onClick = controller::loadMoreThreads) {
+                                Text("加载更多会话")
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -212,13 +258,26 @@ private fun ThreadRow(thread: CodexThread, onClick: () -> Unit) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            val timestamp = formatTimestamp(thread.updatedAt)
+            val branch = thread.gitBranch?.take(80)?.let { "branch $it" }
+            val metadata = listOfNotNull(branch, timestamp.takeIf(String::isNotBlank))
+                .joinToString(" · ")
             Text(
-                thread.preview.ifBlank { formatTimestamp(thread.updatedAt) },
+                thread.preview.ifBlank { metadata },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            if (metadata.isNotBlank() && thread.preview.isNotBlank()) {
+                Text(
+                    metadata,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         if (thread.status.isActive) {
             StatusDot(Color(0xFFFFC857), "运行中")

@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.FilterChip
@@ -61,7 +61,7 @@ fun TerminalScreen(
                 Column {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                         IconButton(onClick = onBack) {
-                            Icon(Icons.Default.ArrowBack, contentDescription = "返回 Codex")
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回 Codex")
                         }
                         Column(Modifier.weight(1f)) {
                             Text(
@@ -116,6 +116,7 @@ fun TerminalScreen(
         AndroidView(
             factory = { terminal.controller.createView() },
             onRelease = terminal.controller::releaseView,
+            update = { terminal.controller.setFontSize(state.settings.terminalFontSizeSp) },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(insets)

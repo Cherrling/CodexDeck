@@ -43,6 +43,7 @@ import cc.cherr.codexdeck.AppController
 import cc.cherr.codexdeck.AppState
 import cc.cherr.codexdeck.ConnectionPhase
 import cc.cherr.codexdeck.data.HostRecord
+import cc.cherr.codexdeck.ssh.usesSshTransport
 
 @Composable
 fun HostsScreen(
@@ -179,7 +180,11 @@ private fun HostCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        "${host.username}@${host.hostname}:${host.port}",
+                        if (host.usesSshTransport()) {
+                            "${host.username}@${host.hostname}:${host.port}"
+                        } else {
+                            host.appServerUrl
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -214,8 +219,14 @@ private fun HostCard(
                 }
             }
             Text(
-                "Codex: ${host.codexExecutable}" +
-                    if (host.jumpHostId != null) " · 经跳板机" else "",
+                when {
+                    host.usesSshTransport() -> buildString {
+                        append("Codex: ")
+                        append(if (host.appServerTransport == "ssh") host.codexExecutable else "SSH Tunnel WebSocket")
+                        if (host.jumpHostId != null) append(" · 经跳板机")
+                    }
+                    else -> "Codex: Direct WebSocket"
+                },
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -229,7 +240,10 @@ private fun HostCard(
                         },
                     )
                 }
-                OutlinedButton(onClick = onTerminal) {
+                OutlinedButton(
+                    onClick = onTerminal,
+                    enabled = host.usesSshTransport(),
+                ) {
                     Text("Shell")
                 }
             }

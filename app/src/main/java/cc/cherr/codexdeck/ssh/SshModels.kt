@@ -2,11 +2,13 @@ package cc.cherr.codexdeck.ssh
 
 import cc.cherr.codexdeck.data.HostRecord
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import java.net.URI
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -49,6 +51,7 @@ sealed interface ConnectionPrompt {
  * Bridges SSHJ's blocking verifier/authentication callbacks to Android UI without leaking
  * credentials into a repository or state snapshot.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class ConnectionPromptGateway {
     private val promptChannel = Channel<ConnectionPrompt>(Channel.UNLIMITED)
     private val secretRequests = ConcurrentHashMap<String, CompletableDeferred<CharArray?>>()
@@ -125,20 +128,64 @@ fun jumpRoute(target: HostRecord, find: (String) -> HostRecord?): List<HostRecor
     return route.asReversed()
 }
 
-fun validateHost(host: HostRecord): String? = when {
-    host.label.isBlank() -> "请填写服务器名称"
-    host.hostname.isBlank() || host.hostname.any { it.isWhitespace() || it == '/' } -> "请填写有效的主机名或 IP"
-    host.port !in 1..65535 -> "SSH 端口必须在 1–65535"
-    host.username.isBlank() -> "请填写用户名"
-    host.authType !in setOf("key", "password") -> "不支持的认证方式"
-    host.connectTimeoutMs !in 3_000..120_000 -> "连接超时必须为 3–120 秒"
-    host.keepAliveSeconds != 0 && host.keepAliveSeconds !in 30..600 -> "Keepalive 必须为 0 或 30–600 秒"
-    host.retryCount !in 0..3 -> "重试次数必须为 0–3"
-    host.codexExecutable.isBlank() || host.codexExecutable.length > 1024 ||
-        host.codexExecutable.any(Char::isISOControl) -> "Codex 可执行文件路径无效"
-    host.authType == "key" && host.identityId.isNullOrBlank() -> "请选择 SSH 身份"
-    else -> null
+fun HostRecord.usesSshTransport(): Boolean =
+    appServerTransport == "ssh" ||
+        (appServerTransport == "websocket" && webSocketViaSsh)
+
+fun validateHost(host: HostRecord): String? {
+    if (host.appServerTransport == "websocket") {
+        validateWebSocketUrl(
+            value = host.appServerUrl,
+            allowInsecure = host.allowInsecureWebSocket,
+            viaSshTunnel = host.webSocketViaSsh,
+        )?.let { return it }
+    }
+    when {
+        host.label.isBlank() -> "请填写服务器名称"
+        host.appServerTransport !in setOf("ssh", "websocket") -> "不支持的 Codex 连接方式"
+        host.connectTimeoutMs !in 3_000..120_000 -> "连接超时必须为 3–120 秒"
+        host.keepAliveSeconds != 0 && host.keepAliveSeconds !in 30..600 ->
+            "Keepalive 必须为 0 或 30–600 秒"
+        host.retryCount !in 0..3 -> "重试次数必须为 0–3"
+        else -> null
+    }?.let { return it }
+    if (!host.usesSshTransport()) return null
+    return when {
+        host.hostname.isBlank() || host.hostname.any { it.isWhitespace() || it == '/' } ->
+            "请填写有效的主机名或 IP"
+        host.port !in 1..65535 -> "SSH 端口必须在 1–65535"
+        host.username.isBlank() -> "请填写用户名"
+        host.authType !in setOf("key", "password") -> "不支持的认证方式"
+        host.appServerTransport == "ssh" && (
+            host.codexExecutable.isBlank() || host.codexExecutable.length > 1024 ||
+                host.codexExecutable.any(Char::isISOControl)
+            ) -> "Codex 可执行文件路径无效"
+        host.authType == "key" && host.identityId.isNullOrBlank() -> "请选择 SSH 身份"
+        else -> null
+    }
 }
+
+private fun validateWebSocketUrl(
+    value: String,
+    allowInsecure: Boolean,
+    viaSshTunnel: Boolean,
+): String? {
+    if (value.isBlank() || value.length > 2048) return "请填写有效的 WebSocket URL"
+    val uri = runCatching { URI(value) }.getOrNull() ?: return "WebSocket URL 格式无效"
+    return when {
+        uri.scheme !in setOf("ws", "wss") -> "WebSocket URL 必须使用 ws:// 或 wss://"
+        uri.host.isNullOrBlank() -> "WebSocket URL 缺少主机名"
+        uri.userInfo != null -> "WebSocket URL 不能包含用户名或密码"
+        uri.fragment != null -> "WebSocket URL 不能包含 fragment"
+        viaSshTunnel && uri.scheme != "ws" -> "SSH Tunnel 仅支持端口转发 ws:// 地址"
+        !viaSshTunnel && uri.scheme == "ws" && !allowInsecure && !isLoopbackHost(uri.host) ->
+            "非回环 ws:// 必须显式允许明文连接；建议使用 wss://"
+        else -> null
+    }
+}
+
+private fun isLoopbackHost(host: String): Boolean =
+    host.lowercase() in setOf("localhost", "127.0.0.1", "::1", "[::1]")
 
 internal fun shellQuote(value: String): String =
     "'" + value.replace("'", "'\"'\"'") + "'"

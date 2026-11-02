@@ -65,6 +65,56 @@ class SshModelsTest {
         assertTrue(validateHost(invalid) != null)
     }
 
+    @Test
+    fun websocketValidationRequiresTlsOrExplicitCleartextOptIn() {
+        val host = HostRecord().apply {
+            id = "ws"
+            label = "WebSocket"
+            appServerTransport = "websocket"
+            appServerUrl = "ws://192.0.2.10:8765/rpc"
+        }
+        assertTrue(validateHost(host)?.contains("ws://") == true)
+
+        host.allowInsecureWebSocket = true
+        assertNull(validateHost(host))
+
+        host.allowInsecureWebSocket = false
+        host.appServerUrl = "wss://codex.example.com/rpc"
+        assertNull(validateHost(host))
+    }
+
+    @Test
+    fun directWebSocketDoesNotRequireUnusedSshFields() {
+        val host = HostRecord().apply {
+            id = "direct"
+            label = "Direct"
+            appServerTransport = "websocket"
+            appServerUrl = "wss://codex.example.com/rpc"
+            hostname = ""
+            username = ""
+            authType = ""
+            identityId = null
+            codexExecutable = ""
+            jumpHostId = "saved-for-ssh-mode"
+        }
+
+        assertNull(validateHost(host))
+    }
+
+    @Test
+    fun sshTunnelAllowsRemoteLoopbackWebSocketWithoutGlobalCleartextOptIn() {
+        val host = host("ws").apply {
+            appServerTransport = "websocket"
+            appServerUrl = "ws://127.0.0.1:8765/rpc"
+            webSocketViaSsh = true
+        }
+
+        assertNull(validateHost(host))
+
+        host.username = ""
+        assertTrue(validateHost(host)?.contains("用户名") == true)
+    }
+
     private fun host(id: String, jumpHostId: String? = null) = HostRecord().apply {
         this.id = id
         label = id

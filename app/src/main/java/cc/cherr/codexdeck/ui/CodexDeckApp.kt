@@ -26,6 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cc.cherr.codexdeck.AppController
+import cc.cherr.codexdeck.approvalKey
 import cc.cherr.codexdeck.data.HostRecord
 import cc.cherr.codexdeck.groupThreads
 
@@ -156,8 +157,14 @@ fun CodexDeckApp(controller: AppController) {
             hosts = state.hosts,
             identities = state.identities,
             onDismiss = { hostEditorVisible = false },
-            onSave = { draft, password, replacePassword ->
-                controller.saveHost(draft, password, replacePassword) { saved ->
+            onSave = { draft, password, replacePassword, appServerToken, replaceToken ->
+                controller.saveHost(
+                    draft,
+                    password,
+                    replacePassword,
+                    appServerToken,
+                    replaceToken,
+                ) { saved ->
                     if (saved) hostEditorVisible = false
                 }
             },
@@ -219,7 +226,11 @@ fun CodexDeckApp(controller: AppController) {
 
     ConnectionPromptDialogs(controller = controller, state = state)
     state.approvals.firstOrNull()?.let { approval ->
-        ApprovalDialog(approval, controller)
+        ApprovalDialog(
+            request = approval,
+            controller = controller,
+            responding = approval.approvalKey() in state.respondingApprovalIds,
+        )
     }
     state.publicKeyDialog?.let { publicKey ->
         PublicKeyDialog(publicKey, onDismiss = controller::dismissPublicKey)

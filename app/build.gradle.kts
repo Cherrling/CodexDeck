@@ -137,9 +137,11 @@ dependencies {
     implementation(libs.bcprov)
     implementation(libs.bcpkix)
     implementation(libs.slf4j.nop)
+    implementation(libs.okhttp)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.okhttp.mockwebserver)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

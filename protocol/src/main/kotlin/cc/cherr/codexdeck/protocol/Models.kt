@@ -1,6 +1,7 @@
 package cc.cherr.codexdeck.protocol
 
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
@@ -43,13 +44,18 @@ data class ThreadRuntimeStatus(
     val isLoaded: Boolean get() = type != "notLoaded"
 }
 
+data class ThreadListPage(
+    val threads: List<CodexThread>,
+    val nextCursor: String?,
+)
+
 data class ThreadSession(
     val thread: CodexThread,
     val model: String?,
     val modelProvider: String?,
     val reasoningEffort: String?,
     val cwd: String,
-    val approvalPolicy: String?,
+    val approvalPolicy: JsonElement?,
     val approvalsReviewer: String?,
     val sandbox: JsonObject?,
     val collaborationMode: String?,
@@ -57,6 +63,19 @@ data class ThreadSession(
     val turns: List<ThreadTurn>,
     val turnsNextCursor: String?,
     val raw: JsonObject,
+)
+
+data class ThreadSettingsSnapshot(
+    val model: String?,
+    val modelProvider: String?,
+    val reasoningEffort: String?,
+    val cwd: String?,
+    val approvalPolicy: JsonElement?,
+    val approvalsReviewer: String?,
+    val sandboxMode: String?,
+    val sandboxPolicy: JsonObject?,
+    val permissionProfile: String?,
+    val collaborationMode: String?,
 )
 
 data class ThreadTurn(
@@ -136,6 +155,38 @@ data class PermissionProfile(
     val allowed: Boolean,
 )
 
+data class CapabilitySkill(
+    val name: String,
+    val description: String,
+    val scope: String,
+    val enabled: Boolean,
+    val path: String,
+)
+
+data class CapabilityMcpServer(
+    val name: String,
+    val runtimeStatus: String,
+    val authStatus: String,
+    val toolCount: Int,
+)
+
+data class CapabilityPlugin(
+    val id: String,
+    val name: String,
+    val description: String,
+    val installed: Boolean,
+    val enabled: Boolean,
+    val version: String?,
+)
+
+data class CapabilitySnapshot(
+    val cwd: String,
+    val skills: List<CapabilitySkill>,
+    val mcpServers: List<CapabilityMcpServer>,
+    val plugins: List<CapabilityPlugin>,
+    val unavailable: Map<String, String>,
+)
+
 sealed interface RequestId {
     val wireValue: Any
 
@@ -149,7 +200,8 @@ sealed interface RequestId {
 
     companion object {
         fun fromJson(value: JsonPrimitive): RequestId =
-            value.longOrNull?.let(::Number) ?: Text(value.content)
+            if (value.isString) Text(value.content)
+            else value.longOrNull?.let(::Number) ?: Text(value.content)
     }
 }
 
@@ -197,10 +249,19 @@ data class InputQuestion(
 
 sealed interface CodexEvent {
     data class Initialized(val result: InitializeResult) : CodexEvent
-    data class ItemUpsert(val threadId: String?, val item: ThreadItem) : CodexEvent
+    data class ItemUpsert(
+        val threadId: String?,
+        val turnId: String?,
+        val item: ThreadItem,
+    ) : CodexEvent
     data class AgentDelta(val threadId: String?, val itemId: String, val delta: String) : CodexEvent
     data class PlanDelta(val threadId: String?, val itemId: String, val delta: String) : CodexEvent
-    data class ReasoningDelta(val threadId: String?, val itemId: String, val delta: String) : CodexEvent
+    data class ReasoningDelta(
+        val threadId: String?,
+        val itemId: String,
+        val delta: String,
+        val summary: Boolean,
+    ) : CodexEvent
     data class CommandOutputDelta(val threadId: String?, val itemId: String, val delta: String) : CodexEvent
     data class TurnChanged(
         val threadId: String?,
@@ -211,9 +272,27 @@ sealed interface CodexEvent {
     ) : CodexEvent
 
     data class ThreadChanged(val threadId: String?, val kind: String) : CodexEvent
+    data class ThreadSettingsChanged(
+        val threadId: String?,
+        val settings: ThreadSettingsSnapshot,
+    ) : CodexEvent
+    data class TurnDiffChanged(
+        val threadId: String?,
+        val turnId: String,
+        val diff: String,
+    ) : CodexEvent
     data class ApprovalRequested(val request: ApprovalRequest) : CodexEvent
+    data class ApprovalResolved(
+        val requestId: RequestId,
+        val threadId: String?,
+    ) : CodexEvent
     data class Warning(val message: String) : CodexEvent
-    data class ServerError(val threadId: String?, val message: String, val code: String? = null) : CodexEvent
+    data class ServerError(
+        val threadId: String?,
+        val message: String,
+        val code: String? = null,
+        val willRetry: Boolean = false,
+    ) : CodexEvent
     data class Diagnostic(val message: String) : CodexEvent
     data class Disconnected(val cause: Throwable?) : CodexEvent
 }
@@ -221,7 +300,7 @@ sealed interface CodexEvent {
 data class ThreadStartOptions(
     val cwd: String,
     val model: String? = null,
-    val approvalPolicy: String = "on-request",
+    val approvalPolicy: JsonElement = JsonPrimitive("on-request"),
     val approvalsReviewer: String = "user",
     val sandbox: String = "workspace-write",
     val permissionProfile: String? = null,
@@ -231,9 +310,9 @@ data class TurnOptions(
     val cwd: String? = null,
     val model: String? = null,
     val reasoningEffort: String? = null,
-    val approvalPolicy: String? = null,
+    val approvalPolicy: JsonElement? = null,
     val approvalsReviewer: String? = null,
-    val sandbox: String? = null,
+    val sandboxPolicy: JsonObject? = null,
     val permissionProfile: String? = null,
     val collaborationMode: JsonObject? = null,
 )

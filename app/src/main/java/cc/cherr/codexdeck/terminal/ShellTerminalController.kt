@@ -1,9 +1,12 @@
 package cc.cherr.codexdeck.terminal
 
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Typeface
+import android.util.TypedValue
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.inputmethod.InputMethodManager
@@ -12,6 +15,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.termux.terminal.KeyHandler
 import com.termux.terminal.TerminalColors
@@ -33,6 +37,7 @@ class ShellTerminalController(
     private val context: Context,
     transport: TerminalTransport,
     private val onFinished: () -> Unit,
+    initialFontSizeSp: Int = 13,
 ) : TerminalSessionClient, TerminalViewClient {
     val session = TerminalSession(transport, 5_000, this)
     private var viewReference = WeakReference<TerminalView>(null)
@@ -52,6 +57,7 @@ class ShellTerminalController(
         private set
     var title by mutableStateOf("Shell")
         private set
+    private var fontSizeSp = initialFontSizeSp.coerceIn(9, 28)
 
     init {
         session.updateSize(80, 24, 8, 16)
@@ -61,6 +67,7 @@ class ShellTerminalController(
         viewReference = WeakReference(terminal)
         terminal.setTerminalViewClient(this)
         terminal.setTypeface(Typeface.MONOSPACE)
+        applyFontSize(terminal)
         terminal.attachSession(session)
         terminal.isFocusableInTouchMode = true
         terminal.setBackgroundColor(backgroundColor)
@@ -88,6 +95,26 @@ class ShellTerminalController(
             }
         }
         terminal.requestFocus()
+    }
+
+    fun setFontSize(sp: Int) {
+        val normalized = sp.coerceIn(9, 28)
+        if (fontSizeSp == normalized) return
+        fontSizeSp = normalized
+        view?.let {
+            applyFontSize(it)
+            it.onScreenUpdated()
+        }
+    }
+
+    private fun applyFontSize(terminal: TerminalView) {
+        terminal.setTextSize(
+            TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_SP,
+                fontSizeSp.toFloat(),
+                terminal.resources.displayMetrics,
+            ).toInt(),
+        )
     }
 
     fun releaseView(released: TerminalView) {
@@ -134,7 +161,7 @@ class ShellTerminalController(
         ) {
             return false
         }
-        ViewCompat.getWindowInsetsController(terminal)
+        windowController(terminal)
             ?.hide(WindowInsetsCompat.Type.ime())
         return true
     }
@@ -144,7 +171,7 @@ class ShellTerminalController(
         if (ViewCompat.getRootWindowInsets(terminal)
                 ?.isVisible(WindowInsetsCompat.Type.ime()) == true
         ) {
-            ViewCompat.getWindowInsetsController(terminal)
+            windowController(terminal)
                 ?.hide(WindowInsetsCompat.Type.ime())
         } else {
             showKeyboard()
@@ -289,4 +316,15 @@ class ShellTerminalController(
     override fun logVerbose(tag: String?, message: String?) = Unit
     override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) = Unit
     override fun logStackTrace(tag: String?, e: Exception?) = Unit
+
+    private fun windowController(view: TerminalView) =
+        context.findActivity()?.let { activity ->
+            WindowCompat.getInsetsController(activity.window, view)
+        }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

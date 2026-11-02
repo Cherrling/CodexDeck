@@ -11,11 +11,15 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.Session
+import net.schmizz.sshj.connection.channel.direct.Parameters
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.Closeable
+import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.net.InetAddress
+import java.net.ServerSocket
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadPoolExecutor
@@ -59,6 +63,38 @@ class SharedSshConnection internal constructor(
         return SharedSshTerminalTransport(this, target)
     }
 
+    fun openLocalTunnel(remoteHost: String, remotePort: Int): SshLocalTunnel {
+        checkOpen()
+        require(remotePort in 1..65535) { "Remote tunnel port is invalid" }
+        val server = ServerSocket(
+            0,
+            32,
+            InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1)),
+        )
+        val forwarder = target.newLocalPortForwarder(
+            Parameters("127.0.0.1", server.localPort, remoteHost, remotePort),
+            server,
+        )
+        val tunnelClosed = AtomicBoolean()
+        lateinit var handle: Closeable
+        handle = Closeable {
+            if (tunnelClosed.compareAndSet(false, true)) {
+                runCatching { forwarder.close() }
+                runCatching { server.close() }
+                untrack(handle)
+            }
+        }
+        track(handle)
+        Thread({
+            runCatching { forwarder.listen() }
+                .onFailure { runCatching { handle.close() } }
+        }, "codexdeck-ssh-tunnel").apply {
+            isDaemon = true
+            start()
+        }
+        return SshLocalTunnel(server.localPort, handle)
+    }
+
     internal fun track(channel: Closeable) {
         check(!closed.get()) { "SSH connection is closed" }
         channels += channel
@@ -87,6 +123,13 @@ class SharedSshConnection internal constructor(
     }
 }
 
+class SshLocalTunnel internal constructor(
+    val localPort: Int,
+    private val closeable: Closeable,
+) : Closeable {
+    override fun close() = closeable.close()
+}
+
 class SshJsonLineTransport internal constructor(
     private val command: Session.Command,
     private val session: Session,
@@ -96,8 +139,8 @@ class SshJsonLineTransport internal constructor(
     private val input = command.inputStream.bufferedReader(Charsets.UTF_8)
     private val output = command.outputStream.bufferedWriter(Charsets.UTF_8)
     private val errors = command.errorStream.bufferedReader(Charsets.UTF_8)
-    private val lineChannel = Channel<String>(Channel.UNLIMITED)
-    private val diagnosticChannel = Channel<String>(Channel.UNLIMITED)
+    private val lineChannel = Channel<String>(capacity = 256)
+    private val diagnosticChannel = Channel<String>(capacity = 128)
     private val stdoutThread = Thread(::readStdout, "codexdeck-appserver-stdout").apply { isDaemon = true }
     private val stderrThread = Thread(::readStderr, "codexdeck-appserver-stderr").apply { isDaemon = true }
 
@@ -124,7 +167,12 @@ class SshJsonLineTransport internal constructor(
         try {
             while (!closed.get()) {
                 val line = input.readLine() ?: break
-                if (line.isNotBlank()) lineChannel.trySend(line)
+                if (line.length > MAX_PROTOCOL_LINE_CHARS) {
+                    throw IOException("app-server stdout line exceeds the protocol size limit")
+                }
+                if (line.isNotBlank() && lineChannel.trySend(line).isFailure) {
+                    throw IOException("app-server stdout queue overflow")
+                }
             }
         } catch (error: Throwable) {
             diagnosticChannel.trySend("app-server stdout: ${error.message.orEmpty()}")
@@ -158,6 +206,10 @@ class SshJsonLineTransport internal constructor(
     }
 
     override suspend fun close() = closeBlocking()
+
+    private companion object {
+        const val MAX_PROTOCOL_LINE_CHARS = 16 * 1024 * 1024
+    }
 }
 
 /**

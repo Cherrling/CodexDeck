@@ -27,11 +27,13 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
@@ -59,15 +61,20 @@ fun HostEditorDialog(
     hosts: List<HostRecord>,
     identities: List<IdentityRecord>,
     onDismiss: () -> Unit,
-    onSave: (HostDraft, String, Boolean) -> Unit,
+    onSave: (HostDraft, String, Boolean, String, Boolean) -> Unit,
 ) {
     var draft by remember(host?.id) {
         mutableStateOf(host?.let(HostDraft::from) ?: HostDraft(identityId = identities.firstOrNull()?.id))
     }
     var password by remember(host?.id) { mutableStateOf("") }
     var replacePassword by remember(host?.id) { mutableStateOf(host?.encryptedPassword?.isEmpty() != false) }
+    var appServerToken by remember(host?.id) { mutableStateOf("") }
+    var replaceAppServerToken by remember(host?.id) {
+        mutableStateOf(host?.encryptedAppServerToken?.isEmpty() != false)
+    }
     var identityMenu by remember { mutableStateOf(false) }
     var jumpMenu by remember { mutableStateOf(false) }
+    val showSshSettings = draft.appServerTransport == "ssh" || draft.webSocketViaSsh
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -119,143 +126,218 @@ fun HostEditorDialog(
                             modifier = Modifier.weight(1.4f),
                         )
                     }
-                    OutlinedTextField(
-                        value = draft.hostname,
-                        onValueChange = { draft = draft.copy(hostname = it) },
-                        label = { Text("主机名 / IP") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (showSshSettings) {
                         OutlinedTextField(
-                            value = draft.port,
-                            onValueChange = { draft = draft.copy(port = it.filter(Char::isDigit)) },
-                            label = { Text("SSH 端口") },
+                            value = draft.hostname,
+                            onValueChange = { draft = draft.copy(hostname = it) },
+                            label = { Text("主机名 / IP") },
                             singleLine = true,
-                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                                keyboardType = KeyboardType.Number,
-                            ),
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.fillMaxWidth(),
                         )
-                        OutlinedTextField(
-                            value = draft.username,
-                            onValueChange = { draft = draft.copy(username = it) },
-                            label = { Text("用户名") },
-                            singleLine = true,
-                            modifier = Modifier.weight(1.5f),
-                        )
-                    }
-                    Text("认证", style = MaterialTheme.typography.titleSmall)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(
-                            selected = draft.authType == "key",
-                            onClick = { draft = draft.copy(authType = "key") },
-                            label = { Text("SSH Key") },
-                        )
-                        FilterChip(
-                            selected = draft.authType == "password",
-                            onClick = { draft = draft.copy(authType = "password") },
-                            label = { Text("密码") },
-                        )
-                    }
-                    if (draft.authType == "key") {
-                        Box {
-                            TextButton(onClick = { identityMenu = true }) {
-                                Text(
-                                    identities.firstOrNull { it.id == draft.identityId }?.label
-                                        ?: "选择 SSH 身份",
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = draft.port,
+                                onValueChange = { draft = draft.copy(port = it.filter(Char::isDigit)) },
+                                label = { Text("SSH 端口") },
+                                singleLine = true,
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                    keyboardType = KeyboardType.Number,
+                                ),
+                                modifier = Modifier.weight(1f),
+                            )
+                            OutlinedTextField(
+                                value = draft.username,
+                                onValueChange = { draft = draft.copy(username = it) },
+                                label = { Text("用户名") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1.5f),
+                            )
+                        }
+                        Text("认证", style = MaterialTheme.typography.titleSmall)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(
+                                selected = draft.authType == "key",
+                                onClick = { draft = draft.copy(authType = "key") },
+                                label = { Text("SSH Key") },
+                            )
+                            FilterChip(
+                                selected = draft.authType == "password",
+                                onClick = { draft = draft.copy(authType = "password") },
+                                label = { Text("密码") },
+                            )
+                        }
+                        if (draft.authType == "key") {
+                            Box {
+                                TextButton(onClick = { identityMenu = true }) {
+                                    Text(
+                                        identities.firstOrNull { it.id == draft.identityId }?.label
+                                            ?: "选择 SSH 身份",
+                                    )
+                                }
+                                DropdownMenu(identityMenu, onDismissRequest = { identityMenu = false }) {
+                                    identities.forEach { identity ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Column {
+                                                    Text(identity.label)
+                                                    Text(
+                                                        identity.algorithm,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                    )
+                                                }
+                                            },
+                                            onClick = {
+                                                draft = draft.copy(identityId = identity.id)
+                                                identityMenu = false
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            if (host?.encryptedPassword?.isNotEmpty() == true) {
+                                Row {
+                                    Checkbox(
+                                        checked = replacePassword,
+                                        onCheckedChange = { replacePassword = it },
+                                    )
+                                    Text("替换已保存密码", Modifier.padding(top = 12.dp))
+                                }
+                            }
+                            if (replacePassword || host?.encryptedPassword?.isEmpty() != false) {
+                                OutlinedTextField(
+                                    value = password,
+                                    onValueChange = { password = it },
+                                    label = { Text("登录密码（仅加密保存）") },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                        keyboardType = KeyboardType.Password,
+                                    ),
+                                    modifier = Modifier.fillMaxWidth(),
                                 )
                             }
-                            DropdownMenu(identityMenu, onDismissRequest = { identityMenu = false }) {
-                                identities.forEach { identity ->
+                        }
+                    }
+                    Text("Codex App Server", style = MaterialTheme.typography.titleSmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = draft.appServerTransport == "ssh",
+                            onClick = { draft = draft.copy(appServerTransport = "ssh") },
+                            label = { Text("SSH stdio") },
+                        )
+                        FilterChip(
+                            selected = draft.appServerTransport == "websocket",
+                            onClick = { draft = draft.copy(appServerTransport = "websocket") },
+                            label = { Text("WebSocket") },
+                        )
+                    }
+                    if (draft.appServerTransport == "websocket") {
+                        OutlinedTextField(
+                            value = draft.appServerUrl,
+                            onValueChange = { draft = draft.copy(appServerUrl = it) },
+                            label = { Text("WebSocket URL") },
+                            supportingText = {
+                                Text("远端监听地址，例如 ws://127.0.0.1:8765 或 wss://codex.example.com")
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = draft.webSocketViaSsh,
+                                onCheckedChange = {
+                                    draft = draft.copy(
+                                        webSocketViaSsh = it,
+                                        jumpHostId = if (it) draft.jumpHostId else null,
+                                    )
+                                },
+                            )
+                            Text("通过此 Host 的 SSH 链路建立本地端口转发")
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = draft.allowInsecureWebSocket,
+                                onCheckedChange = {
+                                    draft = draft.copy(allowInsecureWebSocket = it)
+                                },
+                            )
+                            Text("允许非回环明文 ws://（不推荐）")
+                        }
+                        if (host?.encryptedAppServerToken?.isNotEmpty() == true) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(
+                                    checked = replaceAppServerToken,
+                                    onCheckedChange = { replaceAppServerToken = it },
+                                )
+                                Text("替换已保存的 Bearer Token")
+                            }
+                        }
+                        if (replaceAppServerToken ||
+                            host?.encryptedAppServerToken?.isEmpty() != false
+                        ) {
+                            OutlinedTextField(
+                                value = appServerToken,
+                                onValueChange = { appServerToken = it },
+                                label = { Text("Bearer Token（可留空）") },
+                                singleLine = true,
+                                visualTransformation = PasswordVisualTransformation(),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                    if (showSshSettings) {
+                        Text("连接路径", style = MaterialTheme.typography.titleSmall)
+                        Box {
+                            TextButton(onClick = { jumpMenu = true }) {
+                                Text(
+                                    "跳板机：" +
+                                        (hosts.firstOrNull { it.id == draft.jumpHostId }?.label ?: "直接连接"),
+                                )
+                            }
+                            DropdownMenu(jumpMenu, onDismissRequest = { jumpMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("直接连接") },
+                                    onClick = {
+                                        draft = draft.copy(jumpHostId = null)
+                                        jumpMenu = false
+                                    },
+                                )
+                                hosts.filter { it.id != host?.id }.forEach { option ->
                                     DropdownMenuItem(
                                         text = {
-                                            Column {
-                                                Text(identity.label)
-                                                Text(
-                                                    identity.algorithm,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                )
-                                            }
+                                            Text(
+                                                option.label,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
                                         },
                                         onClick = {
-                                            draft = draft.copy(identityId = identity.id)
-                                            identityMenu = false
+                                            draft = draft.copy(jumpHostId = option.id)
+                                            jumpMenu = false
                                         },
                                     )
                                 }
                             }
                         }
-                    } else {
-                        if (host?.encryptedPassword?.isNotEmpty() == true) {
-                            Row {
-                                Checkbox(
-                                    checked = replacePassword,
-                                    onCheckedChange = { replacePassword = it },
-                                )
-                                Text("替换已保存密码", Modifier.padding(top = 12.dp))
-                            }
-                        }
-                        if (replacePassword || host?.encryptedPassword?.isEmpty() != false) {
-                            OutlinedTextField(
-                                value = password,
-                                onValueChange = { password = it },
-                                label = { Text("登录密码（仅加密保存）") },
-                                singleLine = true,
-                                visualTransformation = PasswordVisualTransformation(),
-                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                                    keyboardType = KeyboardType.Password,
-                                ),
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
+                        Text(
+                            "多级跳板机沿 Host 的 jumpHostId 链展开，每一跳独立校验 Host Key 和认证。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                    Text("连接路径", style = MaterialTheme.typography.titleSmall)
-                    Box {
-                        TextButton(onClick = { jumpMenu = true }) {
-                            Text(
-                                "跳板机：" +
-                                    (hosts.firstOrNull { it.id == draft.jumpHostId }?.label ?: "直接连接"),
-                            )
-                        }
-                        DropdownMenu(jumpMenu, onDismissRequest = { jumpMenu = false }) {
-                            DropdownMenuItem(
-                                text = { Text("直接连接") },
-                                onClick = {
-                                    draft = draft.copy(jumpHostId = null)
-                                    jumpMenu = false
-                                },
-                            )
-                            hosts.filter { it.id != host?.id }.forEach { option ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            option.label,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    },
-                                    onClick = {
-                                        draft = draft.copy(jumpHostId = option.id)
-                                        jumpMenu = false
-                                    },
-                                )
-                            }
-                        }
+                    if (draft.appServerTransport == "ssh") {
+                        OutlinedTextField(
+                            value = draft.codexExecutable,
+                            onValueChange = { draft = draft.copy(codexExecutable = it) },
+                            label = { Text("远端 Codex 可执行文件") },
+                            supportingText = {
+                                Text("例如 codex 或 /opt/codex/bin/codex；不拼接额外 shell 参数")
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
-                    Text(
-                        "多级跳板机沿 Host 的 jumpHostId 链展开，每一跳独立校验 Host Key 和认证。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    OutlinedTextField(
-                        value = draft.codexExecutable,
-                        onValueChange = { draft = draft.copy(codexExecutable = it) },
-                        label = { Text("远端 Codex 可执行文件") },
-                        supportingText = { Text("例如 codex 或 /opt/codex/bin/codex；不拼接额外 shell 参数") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             value = draft.connectTimeoutSeconds,
@@ -297,6 +379,9 @@ fun HostEditorDialog(
                             draft,
                             password,
                             replacePassword || host?.encryptedPassword?.isEmpty() != false,
+                            appServerToken,
+                            replaceAppServerToken ||
+                                host?.encryptedAppServerToken?.isEmpty() != false,
                         )
                     }) {
                         Text("保存")
@@ -320,6 +405,12 @@ fun ImportIdentityDialog(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) {
+        onDispose {
+            bytes?.fill(0)
+            bytes = null
+        }
+    }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { selected ->
         if (selected == null) return@rememberLauncherForActivityResult
         loading = true
@@ -439,6 +530,22 @@ fun PublicKeyDialog(
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val exportPublicKey = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri ->
+        if (uri != null) {
+            scope.launch(Dispatchers.IO) {
+                context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { writer ->
+                    writer.write(data.publicKey)
+                    writer.newLine()
+                }
+            }
+        }
+    }
+    val exportName = (data.label.filter { it.isLetterOrDigit() || it in "-_." }
+        .ifBlank { "id" }
+        .take(64)) + ".pub"
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("${data.label} 公钥") },
@@ -455,11 +562,16 @@ fun PublicKeyDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                context.getSystemService(ClipboardManager::class.java)
-                    .setPrimaryClip(ClipData.newPlainText("SSH public key", data.publicKey))
-                onDismiss()
-            }) { Text("复制并关闭") }
+            Row {
+                TextButton(onClick = { exportPublicKey.launch(exportName) }) {
+                    Text("导出公钥")
+                }
+                TextButton(onClick = {
+                    context.getSystemService(ClipboardManager::class.java)
+                        .setPrimaryClip(ClipData.newPlainText("SSH public key", data.publicKey))
+                    onDismiss()
+                }) { Text("复制并关闭") }
+            }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
     )

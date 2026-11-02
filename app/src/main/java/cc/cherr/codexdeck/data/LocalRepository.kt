@@ -3,6 +3,7 @@ package cc.cherr.codexdeck.data
 import cc.cherr.codexdeck.protocol.CodexThread
 import cc.cherr.codexdeck.ssh.SshKeys
 import cc.cherr.codexdeck.ssh.jumpRoute
+import cc.cherr.codexdeck.ssh.usesSshTransport
 import cc.cherr.codexdeck.ssh.validateHost
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -23,6 +24,8 @@ class LocalRepository(
         draft: HostDraft,
         password: CharArray?,
         replacePassword: Boolean,
+        appServerToken: CharArray?,
+        replaceAppServerToken: Boolean,
     ): HostRecord = withContext(Dispatchers.IO) {
         val port = draft.port.toIntOrNull()
             ?: throw IllegalArgumentException("SSH 端口必须是数字")
@@ -46,6 +49,10 @@ class LocalRepository(
             identityId = draft.identityId
             jumpHostId = draft.jumpHostId?.takeIf(String::isNotBlank)
             codexExecutable = draft.codexExecutable.trim().ifBlank { "codex" }
+            appServerTransport = draft.appServerTransport
+            appServerUrl = draft.appServerUrl.trim()
+            webSocketViaSsh = draft.webSocketViaSsh
+            allowInsecureWebSocket = draft.allowInsecureWebSocket
             connectTimeoutMs = timeout
             keepAliveSeconds = keepAlive
             retryCount = retry
@@ -53,13 +60,16 @@ class LocalRepository(
             createdAt = current?.createdAt ?: now
             updatedAt = now
             encryptedPassword = current?.encryptedPassword ?: ByteArray(0)
+            encryptedAppServerToken = current?.encryptedAppServerToken ?: ByteArray(0)
         }
         validateHost(record)?.let { throw IllegalArgumentException(it) }
 
         val allHosts = dao.hosts().filter { it.id != record.id } + record
-        allHosts.associateBy { it.id }.values.forEach { candidate ->
+        allHosts.associateBy { it.id }.values
+            .filter(HostRecord::usesSshTransport)
+            .forEach { candidate ->
             jumpRoute(candidate, allHosts.associateBy(HostRecord::id)::get)
-        }
+            }
         if (record.jumpHostId == record.id) throw IllegalArgumentException("服务器不能以自己作为跳板机")
         if (record.authType == "key" && dao.identity(record.identityId) == null) {
             throw IllegalArgumentException("所选 SSH 身份不存在")
@@ -69,6 +79,20 @@ class LocalRepository(
             val bytes = chars.concatToString().toByteArray(Charsets.UTF_8)
             try {
                 record.encryptedPassword = vault.encrypt("host-password:${record.id}", bytes)
+            } finally {
+                bytes.fill(0)
+                chars.fill('\u0000')
+            }
+        }
+        if (replaceAppServerToken) {
+            val chars = appServerToken ?: CharArray(0)
+            val bytes = chars.concatToString().toByteArray(Charsets.UTF_8)
+            try {
+                record.encryptedAppServerToken = if (bytes.isEmpty()) {
+                    ByteArray(0)
+                } else {
+                    vault.encrypt("appserver-token:${record.id}", bytes)
+                }
             } finally {
                 bytes.fill(0)
                 chars.fill('\u0000')
@@ -168,6 +192,16 @@ class LocalRepository(
             } finally {
                 bytes.fill(0)
             }
+        }
+    }
+
+    suspend fun appServerToken(host: HostRecord): String = withContext(Dispatchers.IO) {
+        if (host.encryptedAppServerToken.isEmpty()) return@withContext ""
+        val bytes = vault.decrypt("appserver-token:${host.id}", host.encryptedAppServerToken)
+        try {
+            bytes.toString(Charsets.UTF_8)
+        } finally {
+            bytes.fill(0)
         }
     }
 

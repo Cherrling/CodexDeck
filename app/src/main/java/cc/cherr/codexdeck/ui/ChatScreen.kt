@@ -1,7 +1,14 @@
 package cc.cherr.codexdeck.ui
 
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.util.Base64
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,9 +27,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -50,17 +57,23 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cc.cherr.codexdeck.AppController
 import cc.cherr.codexdeck.AppState
 import cc.cherr.codexdeck.ConnectionPhase
+import cc.cherr.codexdeck.approvalKey
+import cc.cherr.codexdeck.sandboxModeLabel
+import cc.cherr.codexdeck.ssh.usesSshTransport
+import cc.cherr.codexdeck.protocol.CapabilitySnapshot
 import cc.cherr.codexdeck.protocol.ApprovalKind
 import cc.cherr.codexdeck.protocol.ApprovalRequest
 import cc.cherr.codexdeck.protocol.ThreadItem
@@ -75,6 +88,10 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -92,12 +109,12 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     var autoFollow by remember { mutableStateOf(true) }
 
-    LaunchedEffect(rows.size, state.isTurnRunning) {
+    LaunchedEffect(rows, autoFollow) {
         if (rows.isNotEmpty() && autoFollow) {
             listState.scrollToItem(rows.lastIndex)
         }
     }
-    LaunchedEffect(listState, state.olderHistoryCursor) {
+    LaunchedEffect(listState, state.olderHistoryCursor, rows.size) {
         snapshotFlow {
             listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
         }.collect { (visibleIndex) ->
@@ -114,7 +131,7 @@ fun ChatScreen(
             TopAppBar(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "返回会话")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回会话")
                     }
                 },
                 title = {
@@ -135,7 +152,8 @@ fun ChatScreen(
                 },
                 actions = {
                     IconButton(
-                        enabled = state.connectionPhase == ConnectionPhase.CONNECTED,
+                        enabled = state.connectionPhase == ConnectionPhase.CONNECTED &&
+                            state.activeHost?.usesSshTransport() == true,
                         onClick = onOpenTerminal,
                     ) { Text("Shell", style = MaterialTheme.typography.labelLarge) }
                     Box {
@@ -156,9 +174,33 @@ fun ChatScreen(
                                 onClick = { menu = false; controller.compactThread() },
                             )
                             DropdownMenuItem(
-                                text = { Text("归档") },
-                                onClick = { menu = false; archiveVisible = true },
+                                text = { Text("Review 未提交变更") },
+                                onClick = {
+                                    menu = false
+                                    controller.reviewUncommittedChanges()
+                                },
                             )
+                            DropdownMenuItem(
+                                text = { Text("Skills / MCP / Plugins") },
+                                onClick = {
+                                    menu = false
+                                    controller.loadCapabilities()
+                                },
+                            )
+                            if (state.showArchivedThreads) {
+                                DropdownMenuItem(
+                                    text = { Text("取消归档") },
+                                    onClick = {
+                                        menu = false
+                                        controller.unarchiveSelectedThread()
+                                    },
+                                )
+                            } else {
+                                DropdownMenuItem(
+                                    text = { Text("归档") },
+                                    onClick = { menu = false; archiveVisible = true },
+                                )
+                            }
                         }
                     }
                 },
@@ -264,6 +306,122 @@ fun ChatScreen(
             },
         )
     }
+    if (state.isLoadingCapabilities || state.capabilities != null) {
+        CapabilityDialog(
+            snapshot = state.capabilities,
+            loading = state.isLoadingCapabilities,
+            onDismiss = controller::dismissCapabilities,
+        )
+    }
+}
+
+@Composable
+private fun CapabilityDialog(
+    snapshot: CapabilitySnapshot?,
+    loading: Boolean,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Codex Capabilities") },
+        text = {
+            if (loading) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    CircularProgressIndicator()
+                }
+            } else if (snapshot != null) {
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 520.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    item {
+                        Text(
+                            snapshot.cwd,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    snapshot.unavailable.forEach { (capability, error) ->
+                        item(key = "unavailable:$capability") {
+                            GenericCard(
+                                "$capability unavailable",
+                                error,
+                                MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                    item {
+                        Text(
+                            "Skills · ${snapshot.skills.size}",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
+                    if (snapshot.skills.isEmpty()) {
+                        item { Text("未发现 Skills") }
+                    }
+                    snapshot.skills.forEach { skill ->
+                        item(key = "skill:${skill.path}:${skill.name}") {
+                            GenericCard(
+                                "${skill.name} · ${skill.scope}" +
+                                    if (skill.enabled) "" else " · disabled",
+                                skill.description,
+                                MaterialTheme.colorScheme.secondary,
+                            )
+                        }
+                    }
+                    item {
+                        Text(
+                            "MCP · ${snapshot.mcpServers.size}",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
+                    if (snapshot.mcpServers.isEmpty()) {
+                        item { Text("未发现 MCP Server") }
+                    }
+                    snapshot.mcpServers.forEach { server ->
+                        item(key = "mcp:${server.name}") {
+                            GenericCard(
+                                server.name,
+                                "status: ${server.runtimeStatus}\n" +
+                                    "auth: ${server.authStatus}\n" +
+                                    "tools: ${server.toolCount}",
+                                MaterialTheme.colorScheme.tertiary,
+                            )
+                        }
+                    }
+                    item {
+                        Text(
+                            "Plugins · ${snapshot.plugins.size}",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
+                    if (snapshot.plugins.isEmpty()) {
+                        item { Text("未发现 Plugins") }
+                    }
+                    snapshot.plugins.forEach { plugin ->
+                        item(key = "plugin:${plugin.id}") {
+                            GenericCard(
+                                plugin.name +
+                                    if (plugin.enabled) "" else " · disabled",
+                                listOfNotNull(
+                                    plugin.description.takeIf(String::isNotBlank),
+                                    "installed: ${plugin.installed}",
+                                    plugin.version?.let { "version: $it" },
+                                ).joinToString("\n"),
+                                Color(0xFFBAA7FF),
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+    )
 }
 
 @Composable
@@ -278,14 +436,14 @@ private fun ControlsBar(state: AppState, controller: AppController) {
         PickerChip(
             label = state.selectedModel?.displayName ?: "模型",
             options = state.models.map { it.id to it.displayName },
-            onSelected = controller::setModel,
+            onSelected = { value -> value?.let(controller::setModel) },
         )
         val efforts = state.selectedModel?.supportedReasoningEfforts.orEmpty()
         if (efforts.isNotEmpty()) {
             PickerChip(
                 label = "推理 ${state.selectedReasoningEffort ?: "默认"}",
                 options = efforts.map { it.effort to it.effort },
-                onSelected = controller::setReasoningEffort,
+                onSelected = { value -> value?.let(controller::setReasoningEffort) },
             )
         }
         PickerChip(
@@ -293,12 +451,13 @@ private fun ControlsBar(state: AppState, controller: AppController) {
             options = state.collaborationModes.mapNotNull { mode ->
                 mode.mode.takeIf(String::isNotBlank)?.let { it to (mode.name.ifBlank { it }) }
             },
-            onSelected = controller::setCollaborationMode,
+            onSelected = { value -> value?.let(controller::setCollaborationMode) },
         )
         PickerChip(
             label = when (state.approvalPolicy) {
                 "never" -> "无需审批"
                 "untrusted" -> "仅信任操作"
+                "granular" -> "细粒度审批"
                 else -> "按需审批"
             },
             options = listOf(
@@ -306,20 +465,29 @@ private fun ControlsBar(state: AppState, controller: AppController) {
                 "untrusted" to "仅信任操作",
                 "never" to "无需审批",
             ),
-            onSelected = controller::setApprovalPolicy,
+            onSelected = { value -> value?.let(controller::setApprovalPolicy) },
         )
         PickerChip(
-            label = when (state.sandbox) {
-                "read-only" -> "只读"
-                "danger-full-access" -> "完全访问"
-                else -> "工作区写入"
+            label = when (state.approvalsReviewer) {
+                "auto_review" -> "自动审查"
+                "guardian_subagent" -> "Guardian（旧）"
+                else -> "用户审批"
             },
+            options = listOf(
+                "user" to "用户审批",
+                "auto_review" to "自动审查（风险由子代理判定）",
+                "guardian_subagent" to "Guardian（旧版兼容）",
+            ),
+            onSelected = { value -> value?.let(controller::setApprovalsReviewer) },
+        )
+        PickerChip(
+            label = sandboxModeLabel(state.sandbox),
             options = listOf(
                 "workspace-write" to "工作区写入",
                 "read-only" to "只读",
                 "danger-full-access" to "完全访问（高风险）",
             ),
-            onSelected = controller::setSandbox,
+            onSelected = { value -> value?.let(controller::setSandbox) },
         )
         if (state.permissionProfiles.isNotEmpty()) {
             PickerChip(
@@ -341,7 +509,7 @@ private fun ControlsBar(state: AppState, controller: AppController) {
 private fun PickerChip(
     label: String,
     options: List<Pair<String?, String>>,
-    onSelected: (String) -> Unit,
+    onSelected: (String?) -> Unit,
     display: (String?) -> String = { it.orEmpty() },
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -356,7 +524,7 @@ private fun PickerChip(
                     text = { Text(display(value)) },
                     onClick = {
                         expanded = false
-                        value?.let(onSelected)
+                        onSelected(value)
                     },
                 )
             }
@@ -367,10 +535,34 @@ private fun PickerChip(
 @Composable
 private fun Composer(state: AppState, controller: AppController) {
     var text by remember(state.selectedThreadId) { mutableStateOf("") }
+    var images by remember(state.selectedThreadId) { mutableStateOf<List<SelectedImage>>(emptyList()) }
+    var attachmentError by remember(state.selectedThreadId) { mutableStateOf<String?>(null) }
     var lastEpoch by remember(state.selectedThreadId) { mutableIntStateOf(state.composerEpoch) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetMultipleContents(),
+    ) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        attachmentError = null
+        scope.launch {
+            try {
+                val remaining = (4 - images.size).coerceAtLeast(0)
+                require(remaining > 0) { "每条消息最多附加 4 张图片" }
+                val loaded = withContext(Dispatchers.IO) {
+                    uris.take(remaining).map { readImageAttachment(context, it) }
+                }
+                images = images + loaded
+            } catch (failure: Throwable) {
+                attachmentError = failure.message ?: "读取图片失败"
+            }
+        }
+    }
     LaunchedEffect(state.composerEpoch) {
         if (state.composerEpoch != lastEpoch) {
             text = ""
+            images = emptyList()
+            attachmentError = null
             lastEpoch = state.composerEpoch
         }
     }
@@ -386,10 +578,46 @@ private fun Composer(state: AppState, controller: AppController) {
                     TextButton(onClick = controller::interruptTurn) { Text("中断") }
                 }
             }
+            if (images.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    images.forEachIndexed { index, image ->
+                        AssistChip(
+                            onClick = {
+                                images = images.filterIndexed { itemIndex, _ -> itemIndex != index }
+                            },
+                            label = {
+                                Text(
+                                    "${image.name} ×",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            },
+                        )
+                    }
+                }
+            }
+            attachmentError?.let {
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(bottom = 4.dp),
+                )
+            }
             Row(
                 verticalAlignment = Alignment.Bottom,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                TextButton(
+                    onClick = { imagePicker.launch("image/*") },
+                    enabled = state.connectionPhase == ConnectionPhase.CONNECTED &&
+                        state.selectedSession != null &&
+                        !state.isLoadingThread &&
+                        !state.isSending,
+                ) { Text("图片") }
                 OutlinedTextField(
                     value = text,
                     onValueChange = { if (it.length <= 200_000) text = it },
@@ -397,17 +625,21 @@ private fun Composer(state: AppState, controller: AppController) {
                     minLines = 1,
                     maxLines = 6,
                     enabled = state.connectionPhase == ConnectionPhase.CONNECTED &&
-                        state.selectedSession != null,
+                        state.selectedSession != null &&
+                        !state.isLoadingThread,
                     placeholder = {
                         Text(if (state.isTurnRunning) "追加指令给当前 Turn…" else "发送消息给 Codex…")
                     },
                     shape = RoundedCornerShape(20.dp),
                 )
                 Button(
-                    enabled = text.isNotBlank() && !state.isSending &&
+                    enabled = (text.isNotBlank() || images.isNotEmpty()) && !state.isSending &&
                         state.connectionPhase == ConnectionPhase.CONNECTED &&
-                        state.selectedSession != null,
-                    onClick = { controller.sendMessage(text) },
+                        state.selectedSession != null &&
+                        !state.isLoadingThread,
+                    onClick = {
+                        controller.sendMessage(text, images.map(SelectedImage::dataUrl))
+                    },
                     modifier = Modifier.height(56.dp),
                 ) {
                     if (state.isSending) {
@@ -416,7 +648,7 @@ private fun Composer(state: AppState, controller: AppController) {
                             strokeWidth = 2.dp,
                         )
                     } else {
-                        Icon(Icons.Default.Send, contentDescription = "发送")
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送")
                     }
                 }
             }
@@ -446,23 +678,39 @@ private fun buildTimelineRows(turns: List<ThreadTurn>): List<TimelineRow> =
 
 @Composable
 private fun TurnHeader(turn: ThreadTurn) {
-    Row(
+    var showDiff by remember(turn.id) { mutableStateOf(false) }
+    Column(
         modifier = Modifier.fillMaxWidth().padding(top = 10.dp, start = 4.dp, end = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        Text(
-            when (turn.status) {
-                "inProgress" -> "运行中"
-                "completed" -> "完成"
-                "failed" -> "失败"
-                "interrupted" -> "已中断"
-                else -> turn.status
-            },
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.width(8.dp))
-        HorizontalDivider(Modifier.weight(1f))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                when (turn.status) {
+                    "inProgress" -> "运行中"
+                    "completed" -> "完成"
+                    "failed" -> "失败"
+                    "interrupted" -> "已中断"
+                    else -> turn.status
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(8.dp))
+            HorizontalDivider(Modifier.weight(1f))
+        }
+        turn.error?.message?.takeIf(String::isNotBlank)?.let { message ->
+            Text(
+                message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        turn.raw["diff"]?.stringValue()?.takeIf(String::isNotBlank)?.let { diff ->
+            TextButton(onClick = { showDiff = !showDiff }) {
+                Text(if (showDiff) "收起 Turn Diff" else "查看 Turn Diff")
+            }
+            if (showDiff) CodeBlock(diff)
+        }
     }
 }
 
@@ -545,9 +793,12 @@ private fun AgentMessageCard(item: ThreadItem) {
 @Composable
 private fun ReasoningCard(item: ThreadItem) {
     var expanded by remember(item.id) { mutableStateOf(false) }
-    val summary = arrayStrings(item.raw["summary"])
-        .ifEmpty { arrayStrings(item.raw["content"]) }
-        .joinToString("\n\n")
+    val summary = buildList {
+        addAll(arrayStrings(item.raw["summary"]))
+        addAll(arrayStrings(item.raw["content"]))
+        item.raw["reasoningSummary"]?.stringValue()?.let(::add)
+        item.raw["reasoningText"]?.stringValue()?.let(::add)
+    }.filter(String::isNotBlank).joinToString("\n\n")
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -703,7 +954,8 @@ private fun ItemShell(
 
 @Composable
 private fun CodeBlock(text: String) {
-    val scroll = rememberScrollState()
+    val horizontal = rememberScrollState()
+    val vertical = rememberScrollState()
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(10.dp),
@@ -714,9 +966,10 @@ private fun CodeBlock(text: String) {
             Text(
                 text = text,
                 modifier = Modifier
-                    .horizontalScroll(scroll)
-                    .padding(10.dp)
-                    .heightIn(max = 520.dp),
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(vertical)
+                    .horizontalScroll(horizontal)
+                    .padding(10.dp),
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
             )
         }
@@ -740,6 +993,48 @@ private fun MarkdownContent(text: String, modifier: Modifier = Modifier) {
 }
 
 private data class MarkdownPart(val text: String, val isCode: Boolean)
+private data class SelectedImage(val name: String, val dataUrl: String)
+
+private fun readImageAttachment(context: Context, uri: Uri): SelectedImage {
+    val resolver = context.contentResolver
+    val mimeType = resolver.getType(uri)
+        ?.lowercase()
+        ?.takeIf { it.startsWith("image/") }
+        ?: "image/jpeg"
+    val name = runCatching {
+        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }.getOrNull()
+        ?.filterNot(Char::isISOControl)
+        ?.take(80)
+        ?.takeIf(String::isNotBlank)
+        ?: "image"
+    val bytes = ByteArrayOutputStream()
+    val buffer = ByteArray(16 * 1024)
+    try {
+        resolver.openInputStream(uri)?.use { input ->
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                require(bytes.size() + count <= 5 * 1024 * 1024) {
+                    "单张图片不能超过 5 MiB"
+                }
+                bytes.write(buffer, 0, count)
+            }
+        } ?: error("无法读取图片 $name")
+        val raw = bytes.toByteArray()
+        try {
+            val encoded = Base64.encodeToString(raw, Base64.NO_WRAP)
+            return SelectedImage(name, "data:$mimeType;base64,$encoded")
+        } finally {
+            raw.fill(0)
+        }
+    } finally {
+        buffer.fill(0)
+        bytes.reset()
+    }
+}
 
 private fun splitFences(text: String): List<MarkdownPart> {
     val parts = mutableListOf<MarkdownPart>()
@@ -764,7 +1059,11 @@ private fun splitFences(text: String): List<MarkdownPart> {
 }
 
 @Composable
-fun ApprovalDialog(request: ApprovalRequest, controller: AppController) {
+fun ApprovalDialog(
+    request: ApprovalRequest,
+    controller: AppController,
+    responding: Boolean,
+) {
     val questions = remember(request.requestId.wireValue) { approvalQuestions(request.params) }
     var answers by remember(request.requestId.wireValue) {
         mutableStateOf(questions.associate { it.id to "" })
@@ -777,7 +1076,7 @@ fun ApprovalDialog(request: ApprovalRequest, controller: AppController) {
         title = { Text(request.title) },
         text = {
             Column(
-                modifier = Modifier.heightIn(max = 520.dp).horizontalScroll(rememberScrollState()),
+                modifier = Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(request.detail, style = MaterialTheme.typography.bodyMedium)
@@ -819,12 +1118,12 @@ fun ApprovalDialog(request: ApprovalRequest, controller: AppController) {
                         "accept",
                         answers.mapValues { listOf(it.value) },
                     )
-                }) { Text("提交") }
+                }, enabled = !responding) { Text(if (responding) "提交中…" else "提交") }
             } else {
                 Column {
                     TextButton(onClick = {
                         controller.respondToApproval(request, "accept")
-                    }) { Text("允许一次") }
+                    }, enabled = !responding) { Text("允许一次") }
                     if (request.kind in setOf(
                             ApprovalKind.COMMAND,
                             ApprovalKind.FILE_CHANGE,
@@ -833,13 +1132,16 @@ fun ApprovalDialog(request: ApprovalRequest, controller: AppController) {
                     ) {
                         TextButton(onClick = {
                             controller.respondToApproval(request, "acceptForSession")
-                        }) { Text("本会话允许") }
+                        }, enabled = !responding) { Text("本会话允许") }
                     }
                 }
             }
         },
         dismissButton = {
-            TextButton(onClick = { controller.rejectApproval(request) }) { Text("拒绝") }
+            TextButton(
+                onClick = { controller.rejectApproval(request) },
+                enabled = !responding,
+            ) { Text("拒绝") }
         },
     )
 }

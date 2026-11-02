@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -46,7 +47,7 @@ class AppServerClient(
     private val requestIds = AtomicLong(1)
     private val writeMutex = Mutex()
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<JsonElement>>()
-    private val eventsChannel = Channel<CodexEvent>(Channel.UNLIMITED)
+    private val eventsChannel = Channel<CodexEvent>(capacity = 512)
     private val readerStarted = AtomicBoolean()
     private val closed = AtomicBoolean()
     private val ownsScope = scope == null
@@ -95,25 +96,43 @@ class AppServerClient(
         val cursors = mutableSetOf<String>()
         var cursor: String? = null
         do {
-            val response = requestObject(
-                "thread/list",
-                buildJsonObject {
-                    put("limit", 100)
-                    put("sortKey", "updated_at")
-                    put("sortDirection", "desc")
-                    put("archived", archived)
-                    put("sourceKinds", buildJsonArray {})
-                    cursor?.let { put("cursor", it) }
-                    searchTerm?.trim()?.takeIf(String::isNotEmpty)?.let { put("searchTerm", it) }
-                },
+            val page = listThreadsPage(
+                archived = archived,
+                searchTerm = searchTerm,
+                cursor = cursor,
+                limit = 100,
             )
-            response.array("data").mapNotNull(::parseThread).forEach { threads[it.id] = it }
-            cursor = response.string("nextCursor")?.takeIf(String::isNotBlank)
+            page.threads.forEach { threads[it.id] = it }
+            cursor = page.nextCursor
             if (cursor != null && !cursors.add(cursor)) {
                 throw RpcException(message = "thread/list returned a repeated pagination cursor")
             }
         } while (cursor != null)
         return threads.values.toList()
+    }
+
+    suspend fun listThreadsPage(
+        archived: Boolean = false,
+        searchTerm: String? = null,
+        cursor: String? = null,
+        limit: Int = 50,
+    ): ThreadListPage {
+        val response = requestObject(
+            "thread/list",
+            buildJsonObject {
+                put("limit", limit.coerceIn(1, 100))
+                put("sortKey", "updated_at")
+                put("sortDirection", "desc")
+                put("archived", archived)
+                put("sourceKinds", buildJsonArray {})
+                cursor?.takeIf(String::isNotBlank)?.let { put("cursor", it) }
+                searchTerm?.trim()?.takeIf(String::isNotEmpty)?.let { put("searchTerm", it) }
+            },
+        )
+        return ThreadListPage(
+            threads = response.array("data").mapNotNull(::parseThread),
+            nextCursor = response.string("nextCursor")?.takeIf(String::isNotBlank),
+        )
     }
 
     suspend fun readThread(threadId: String): CodexThread {
@@ -131,7 +150,7 @@ class AppServerClient(
 
     suspend fun resumeThread(
         threadId: String,
-        approvalPolicy: String? = null,
+        approvalPolicy: JsonElement? = null,
         approvalsReviewer: String? = null,
         sandbox: String? = null,
         permissionProfile: String? = null,
@@ -143,8 +162,11 @@ class AppServerClient(
                 put("excludeTurns", true)
                 approvalPolicy?.let { put("approvalPolicy", it) }
                 approvalsReviewer?.let { put("approvalsReviewer", it) }
-                sandbox?.let { put("sandbox", it) }
-                permissionProfile?.let { put("permissions", it) }
+                if (permissionProfile.isNullOrBlank()) {
+                    sandbox?.let { put("sandbox", it) }
+                } else {
+                    put("permissions", permissionProfile)
+                }
             },
         )
         val threadObject = response.obj("thread")
@@ -158,7 +180,7 @@ class AppServerClient(
             modelProvider = response.string("modelProvider") ?: thread.modelProvider,
             reasoningEffort = response.string("reasoningEffort"),
             cwd = response.string("cwd") ?: thread.cwd,
-            approvalPolicy = response.string("approvalPolicy"),
+            approvalPolicy = response["approvalPolicy"],
             approvalsReviewer = response.string("approvalsReviewer"),
             sandbox = response.obj("sandbox"),
             collaborationMode = response.obj("collaborationMode")?.string("mode"),
@@ -218,7 +240,7 @@ class AppServerClient(
             modelProvider = response.string("modelProvider") ?: thread.modelProvider,
             reasoningEffort = response.string("reasoningEffort"),
             cwd = response.string("cwd") ?: options.cwd,
-            approvalPolicy = response.string("approvalPolicy") ?: options.approvalPolicy,
+            approvalPolicy = response["approvalPolicy"] ?: options.approvalPolicy,
             approvalsReviewer = response.string("approvalsReviewer") ?: options.approvalsReviewer,
             sandbox = response.obj("sandbox"),
             collaborationMode = response.obj("collaborationMode")?.string("mode"),
@@ -251,7 +273,7 @@ class AppServerClient(
             modelProvider = response.string("modelProvider") ?: thread.modelProvider,
             reasoningEffort = response.string("reasoningEffort"),
             cwd = response.string("cwd") ?: thread.cwd,
-            approvalPolicy = response.string("approvalPolicy"),
+            approvalPolicy = response["approvalPolicy"],
             approvalsReviewer = response.string("approvalsReviewer"),
             sandbox = response.obj("sandbox"),
             collaborationMode = response.obj("collaborationMode")?.string("mode"),
@@ -266,8 +288,11 @@ class AppServerClient(
         threadId: String,
         text: String,
         options: TurnOptions = TurnOptions(),
+        imageDataUrls: List<String> = emptyList(),
     ): ThreadTurn {
-        require(text.isNotBlank()) { "Turn input must not be blank" }
+        require(text.isNotBlank() || imageDataUrls.isNotEmpty()) {
+            "Turn input must contain text or an image"
+        }
         val response = requestObject(
             "turn/start",
             buildJsonObject {
@@ -277,18 +302,14 @@ class AppServerClient(
                 options.approvalsReviewer?.let { put("approvalsReviewer", it) }
                 options.model?.takeIf(String::isNotBlank)?.let { put("model", it) }
                 options.reasoningEffort?.takeIf(String::isNotBlank)?.let { put("effort", it) }
-                options.permissionProfile?.takeIf(String::isNotBlank)?.let { put("permissions", it) }
-                options.sandbox?.takeIf(String::isNotBlank)?.let { policy ->
-                    put("sandboxPolicy", buildJsonObject {
-                        put("type", when (policy) {
-                            "danger-full-access", "dangerFullAccess" -> "dangerFullAccess"
-                            "read-only", "readOnly" -> "readOnly"
-                            else -> "workspaceWrite"
-                        })
-                    })
+                val permissionProfile = options.permissionProfile?.takeIf(String::isNotBlank)
+                if (permissionProfile != null) {
+                    put("permissions", permissionProfile)
+                } else {
+                    options.sandboxPolicy?.let { put("sandboxPolicy", it) }
                 }
                 options.collaborationMode?.let { put("collaborationMode", it) }
-                put("input", textInput(text))
+                put("input", userInput(text, imageDataUrls))
             },
             timeout = 60.seconds,
         )
@@ -300,14 +321,17 @@ class AppServerClient(
         threadId: String,
         expectedTurnId: String,
         text: String,
+        imageDataUrls: List<String> = emptyList(),
     ): String {
-        require(text.isNotBlank()) { "Steering input must not be blank" }
+        require(text.isNotBlank() || imageDataUrls.isNotEmpty()) {
+            "Steering input must contain text or an image"
+        }
         val response = requestObject(
             "turn/steer",
             buildJsonObject {
                 put("threadId", threadId)
                 put("expectedTurnId", expectedTurnId)
-                put("input", textInput(text))
+                put("input", userInput(text, imageDataUrls))
             },
         )
         return response.string("turnId") ?: expectedTurnId
@@ -402,18 +426,106 @@ class AppServerClient(
         }
     }
 
+    suspend fun listSkills(cwd: String): List<CapabilitySkill> {
+        val response = requestObject(
+            "skills/list",
+            buildJsonObject {
+                put("cwds", buildJsonArray { add(JsonPrimitive(cwd)) })
+            },
+        )
+        return response.array("data").flatMap { entry ->
+            val item = entry.asObject() ?: return@flatMap emptyList()
+            item.array("skills").mapNotNull { element ->
+                val skill = element.asObject() ?: return@mapNotNull null
+                val name = skill.string("name") ?: return@mapNotNull null
+                CapabilitySkill(
+                    name = name,
+                    description = skill.string("description").orEmpty(),
+                    scope = skill.string("scope").orEmpty(),
+                    enabled = skill.boolean("enabled", true),
+                    path = skill.string("path").orEmpty(),
+                )
+            }
+        }
+    }
+
+    suspend fun listMcpServers(threadId: String? = null): List<CapabilityMcpServer> {
+        val servers = linkedMapOf<String, CapabilityMcpServer>()
+        val cursors = mutableSetOf<String>()
+        var cursor: String? = null
+        do {
+            val response = requestObject(
+                "mcpServerStatus/list",
+                buildJsonObject {
+                    put("limit", 100)
+                    put("detail", "toolsAndAuthOnly")
+                    threadId?.takeIf(String::isNotBlank)?.let { put("threadId", it) }
+                    cursor?.let { put("cursor", it) }
+                },
+            )
+            response.array("data").mapNotNull { element ->
+                val server = element.asObject() ?: return@mapNotNull null
+                val name = server.string("name") ?: return@mapNotNull null
+                CapabilityMcpServer(
+                    name = name,
+                    runtimeStatus = server.string("runtimeStatus") ?: "unknown",
+                    authStatus = server.string("authStatus") ?: "unknown",
+                    toolCount = server.obj("tools")?.size ?: 0,
+                )
+            }.forEach { servers[it.name] = it }
+            cursor = response.string("nextCursor")?.takeIf(String::isNotBlank)
+            if (cursor != null && !cursors.add(cursor)) {
+                throw RpcException(message = "mcpServerStatus/list returned a repeated cursor")
+            }
+        } while (cursor != null)
+        return servers.values.toList()
+    }
+
+    suspend fun listPlugins(cwd: String): List<CapabilityPlugin> {
+        val response = requestObject(
+            "plugin/list",
+            buildJsonObject {
+                put("cwds", buildJsonArray { add(JsonPrimitive(cwd)) })
+                put("forceRefetch", false)
+            },
+        )
+        return response.array("marketplaces").flatMap { marketplace ->
+            val item = marketplace.asObject() ?: return@flatMap emptyList()
+            item.array("plugins").mapNotNull { element ->
+                val plugin = element.asObject() ?: return@mapNotNull null
+                val id = plugin.string("id") ?: return@mapNotNull null
+                val interfaceObject = plugin.obj("interface")
+                CapabilityPlugin(
+                    id = id,
+                    name = interfaceObject?.string("displayName")
+                        ?: plugin.string("name")
+                        ?: id,
+                    description = interfaceObject?.string("shortDescription")
+                        ?: interfaceObject?.string("longDescription").orEmpty(),
+                    installed = plugin.boolean("installed"),
+                    enabled = plugin.boolean("enabled"),
+                    version = plugin.string("localVersion") ?: plugin.string("version"),
+                )
+            }
+        }.distinctBy(CapabilityPlugin::id)
+    }
+
     suspend fun startReview(
         threadId: String,
         target: JsonObject,
         delivery: String = "inline",
-    ): JsonObject = requestObject(
-        "review/start",
-        buildJsonObject {
-            put("threadId", threadId)
-            put("delivery", delivery)
-            put("target", target)
-        },
-    )
+    ): ThreadTurn {
+        val response = requestObject(
+            "review/start",
+            buildJsonObject {
+                put("threadId", threadId)
+                put("delivery", delivery)
+                put("target", target)
+            },
+        )
+        return response.obj("turn")?.let(::parseTurn)
+            ?: throw RpcException(message = "review/start did not return a turn")
+    }
 
     suspend fun requestRaw(method: String, params: JsonObject = JsonObject(emptyMap())): JsonObject =
         requestObject(method, params)
@@ -530,7 +642,9 @@ class AppServerClient(
     private suspend fun send(message: JsonObject) {
         writeMutex.withLock {
             if (closed.get()) throw RpcException(message = "App-server client is closed")
-            transport.send(json.encodeToString(JsonObject.serializer(), message))
+            withContext(Dispatchers.IO) {
+                transport.send(json.encodeToString(JsonObject.serializer(), message))
+            }
         }
     }
 
@@ -668,7 +782,34 @@ class AppServerClient(
         when (method) {
             "item/started", "item/completed" -> {
                 val item = params.obj("item")?.let(::parseItem) ?: return
-                eventsChannel.send(CodexEvent.ItemUpsert(params.string("threadId"), item))
+                eventsChannel.send(
+                    CodexEvent.ItemUpsert(
+                        threadId = params.string("threadId"),
+                        turnId = params.string("turnId"),
+                        item = item,
+                    ),
+                )
+            }
+            "item/fileChange/patchUpdated" -> {
+                val itemId = params.string("itemId") ?: return
+                val item = ThreadItem(
+                    id = itemId,
+                    type = "fileChange",
+                    status = "inProgress",
+                    raw = buildJsonObject {
+                        put("id", itemId)
+                        put("type", "fileChange")
+                        put("status", "inProgress")
+                        params["changes"]?.let { put("changes", it) }
+                    },
+                )
+                eventsChannel.send(
+                    CodexEvent.ItemUpsert(
+                        threadId = params.string("threadId"),
+                        turnId = params.string("turnId"),
+                        item = item,
+                    ),
+                )
             }
             "item/agentMessage/delta" -> eventsChannel.send(
                 CodexEvent.AgentDelta(
@@ -684,11 +825,20 @@ class AppServerClient(
                     params.string("delta").orEmpty(),
                 ),
             )
-            "item/reasoning/summaryTextDelta", "item/reasoning/textDelta" -> eventsChannel.send(
+            "item/reasoning/summaryTextDelta" -> eventsChannel.send(
                 CodexEvent.ReasoningDelta(
                     params.string("threadId"),
                     params.string("itemId").orEmpty(),
                     params.string("delta").orEmpty(),
+                    summary = true,
+                ),
+            )
+            "item/reasoning/textDelta" -> eventsChannel.send(
+                CodexEvent.ReasoningDelta(
+                    params.string("threadId"),
+                    params.string("itemId").orEmpty(),
+                    params.string("delta").orEmpty(),
+                    summary = false,
                 ),
             )
             "item/commandExecution/outputDelta" -> eventsChannel.send(
@@ -698,6 +848,18 @@ class AppServerClient(
                     params.string("delta").orEmpty(),
                 ),
             )
+            "item/commandExecution/terminalInteraction" -> {
+                val stdin = params.string("stdin").orEmpty()
+                if (stdin.isNotBlank()) {
+                    eventsChannel.send(
+                        CodexEvent.CommandOutputDelta(
+                            params.string("threadId"),
+                            params.string("itemId").orEmpty(),
+                            "\n> ${stdin.take(20_000)}\n",
+                        ),
+                    )
+                }
+            }
             "turn/started" -> {
                 val turn = params.obj("turn")
                 eventsChannel.send(
@@ -721,9 +883,75 @@ class AppServerClient(
                     ),
                 )
             }
+            "turn/diff/updated" -> {
+                val threadId = params.string("threadId")
+                val turnId = params.string("turnId") ?: return
+                eventsChannel.send(
+                    CodexEvent.TurnDiffChanged(
+                        threadId = threadId,
+                        turnId = turnId,
+                        diff = params.string("diff").orEmpty(),
+                    ),
+                )
+            }
+            "turn/plan/updated" -> {
+                val threadId = params.string("threadId")
+                val turnId = params.string("turnId") ?: return
+                val itemId = "plan:$turnId"
+                val lines = params.array("plan").mapNotNull { element ->
+                    val step = element.asObject() ?: return@mapNotNull null
+                    val text = step.string("step") ?: return@mapNotNull null
+                    "- [${step.string("status").orEmpty()}] $text"
+                }
+                val text = buildString {
+                    params.string("explanation")?.takeIf(String::isNotBlank)?.let {
+                        append(it)
+                        append("\n\n")
+                    }
+                    append(lines.joinToString("\n"))
+                }
+                eventsChannel.send(
+                    CodexEvent.ItemUpsert(
+                        threadId = threadId,
+                        turnId = turnId,
+                        item = ThreadItem(
+                            id = itemId,
+                            type = "plan",
+                            status = "inProgress",
+                            raw = buildJsonObject {
+                                put("id", itemId)
+                                put("type", "plan")
+                                put("status", "inProgress")
+                                put("text", text)
+                                put("plan", params["plan"] ?: buildJsonArray {})
+                            },
+                        ),
+                    ),
+                )
+            }
             "thread/started", "thread/closed", "thread/archived", "thread/unarchived",
             "thread/name/updated", "thread/status/changed", "thread/deleted",
             -> eventsChannel.send(CodexEvent.ThreadChanged(params.string("threadId"), method))
+            "thread/settings/updated" -> {
+                val settings = params.obj("threadSettings")?.let(::parseThreadSettings) ?: return
+                eventsChannel.send(
+                    CodexEvent.ThreadSettingsChanged(
+                        threadId = params.string("threadId"),
+                        settings = settings,
+                    ),
+                )
+            }
+            "serverRequest/resolved" -> {
+                val requestId = (params["requestId"] as? JsonPrimitive)
+                    ?.let(RequestId::fromJson)
+                    ?: return
+                eventsChannel.send(
+                    CodexEvent.ApprovalResolved(
+                        requestId = requestId,
+                        threadId = params.string("threadId"),
+                    ),
+                )
+            }
             "error" -> {
                 val error = params.obj("error")
                 eventsChannel.send(
@@ -731,6 +959,7 @@ class AppServerClient(
                         threadId = params.string("threadId"),
                         message = error?.string("message") ?: params.string("message") ?: "Codex server error",
                         code = error?.string("codexErrorInfo"),
+                        willRetry = params.boolean("willRetry"),
                     ),
                 )
             }
@@ -752,13 +981,26 @@ class AppServerClient(
         kotlinx.coroutines.runBlocking { runCatching { transport.close() } }
     }
 
-    private fun textInput(text: String) = buildJsonArray {
-        add(buildJsonObject {
-            put("type", "text")
-            put("text", text)
-            put("text_elements", buildJsonArray {})
-        })
-    }
+    private fun userInput(text: String, imageDataUrls: List<String>): kotlinx.serialization.json.JsonArray =
+        buildJsonArray {
+            if (text.isNotBlank()) {
+                add(buildJsonObject {
+                    put("type", "text")
+                    put("text", text)
+                    put("text_elements", buildJsonArray {})
+                })
+            }
+            imageDataUrls.forEach { dataUrl ->
+                require(dataUrl.startsWith("data:image/") && dataUrl.contains(";base64,")) {
+                    "Only inline base64 image data URLs are supported"
+                }
+                add(buildJsonObject {
+                    put("type", "image")
+                    put("url", dataUrl)
+                    put("detail", "high")
+                })
+            }
+        }
 
     companion object {
         internal fun parseThread(element: JsonElement): CodexThread? {
@@ -825,6 +1067,33 @@ class AppServerClient(
                 status = item.string("status").orEmpty(),
                 raw = item,
             )
+        }
+
+        internal fun parseThreadSettings(element: JsonElement): ThreadSettingsSnapshot? {
+            val settings = element.asObject() ?: return null
+            val sandbox = settings.obj("sandboxPolicy")
+            return ThreadSettingsSnapshot(
+                model = settings.string("model"),
+                modelProvider = settings.string("modelProvider"),
+                reasoningEffort = settings.string("effort")
+                    ?: settings.string("reasoningEffort"),
+                cwd = settings.string("cwd"),
+                approvalPolicy = settings["approvalPolicy"],
+                approvalsReviewer = settings.string("approvalsReviewer"),
+                sandboxMode = sandboxMode(sandbox),
+                sandboxPolicy = sandbox,
+                permissionProfile = settings.obj("activePermissionProfile")?.string("id"),
+                collaborationMode = settings.obj("collaborationMode")?.string("mode"),
+            )
+        }
+
+        internal fun sandboxMode(policy: JsonObject?): String? = when (
+            policy?.string("type")
+        ) {
+            "readOnly" -> "read-only"
+            "workspaceWrite" -> "workspace-write"
+            "dangerFullAccess" -> "danger-full-access"
+            else -> null
         }
 
         internal fun parseModel(element: JsonElement): ModelInfo? {

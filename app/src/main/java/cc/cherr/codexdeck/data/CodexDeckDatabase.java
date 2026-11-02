@@ -10,7 +10,7 @@ import androidx.room.RoomDatabase;
         KnownHostRecord.class,
         CachedThreadRecord.class
     },
-    version = 1,
+    version = 2,
     exportSchema = true
 )
 public abstract class CodexDeckDatabase extends RoomDatabase {

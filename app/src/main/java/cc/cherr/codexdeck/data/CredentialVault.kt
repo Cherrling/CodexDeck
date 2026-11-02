@@ -8,13 +8,18 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+interface SecretCipher {
+    fun encrypt(context: String, plaintext: ByteArray): ByteArray
+    fun decrypt(context: String, blob: ByteArray): ByteArray
+}
+
 /**
  * AES-GCM keys stay in Android Keystore. A missing Keystore key is never silently recreated,
  * because that would make existing ciphertext look valid while being undecryptable.
  */
 class CredentialVault(
     private val alias: String = "codexdeck.credentials.v1",
-) {
+) : SecretCipher {
     private fun key(create: Boolean): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (store.getKey(alias, null) as? SecretKey)?.let { return it }
@@ -34,11 +39,11 @@ class CredentialVault(
     }
 
     @Synchronized
-    fun encrypt(context: String, plaintext: ByteArray): ByteArray =
+    override fun encrypt(context: String, plaintext: ByteArray): ByteArray =
         SecretEnvelope.encrypt(key(create = true), context, plaintext)
 
     @Synchronized
-    fun decrypt(context: String, blob: ByteArray): ByteArray =
+    override fun decrypt(context: String, blob: ByteArray): ByteArray =
         SecretEnvelope.decrypt(key(create = false), context, blob)
 }
 

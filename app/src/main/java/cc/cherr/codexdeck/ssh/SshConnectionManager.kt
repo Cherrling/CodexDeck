@@ -2,11 +2,15 @@ package cc.cherr.codexdeck.ssh
 
 import cc.cherr.codexdeck.data.CredentialVault
 import cc.cherr.codexdeck.data.HostRecord
+import cc.cherr.codexdeck.data.IdentityRecord
 import cc.cherr.codexdeck.data.KnownHostRecord
+import cc.cherr.codexdeck.data.SecretCipher
 import cc.cherr.codexdeck.data.StoreDao
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import net.schmizz.sshj.DefaultSecurityProviderConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.transport.verification.HostKeyVerifier
@@ -18,40 +22,66 @@ import java.net.UnknownHostException
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.SocketFactory
 
 class SshConnectionManager(
-    private val dao: StoreDao,
-    private val vault: CredentialVault,
+    private val findHost: (String) -> HostRecord?,
+    private val findIdentity: (String) -> IdentityRecord?,
+    private val findKnownHost: (String, Int) -> KnownHostRecord?,
+    private val persistKnownHost: (KnownHostRecord) -> Unit,
+    private val vault: SecretCipher,
 ) : AutoCloseable {
+    constructor(dao: StoreDao, vault: CredentialVault) : this(
+        findHost = dao::host,
+        findIdentity = dao::identity,
+        findKnownHost = dao::knownHost,
+        persistKnownHost = dao::saveKnownHost,
+        vault = vault,
+    )
+
     private val connections = ConcurrentHashMap<String, SharedSshConnection>()
+    private val connectionMutex = Mutex()
     private val closed = AtomicBoolean()
+    private val connectionGeneration = AtomicLong()
 
     suspend fun connect(
         hostId: String,
         gateway: ConnectionPromptGateway,
     ): SharedSshConnection = withContext(Dispatchers.IO) {
+        connectionMutex.withLock { connectLocked(hostId, gateway) }
+    }
+
+    private suspend fun connectLocked(
+        hostId: String,
+        gateway: ConnectionPromptGateway,
+    ): SharedSshConnection {
         check(!closed.get()) { "SSH manager is closed" }
+        val generationAtStart = connectionGeneration.get()
         connections[hostId]?.takeIf { connection ->
             runCatching { connection.checkOpen() }.isSuccess
-        }?.let { return@withContext it }
+        }?.let { return it }
         connections.remove(hostId)?.close()
 
-        val target = requireNotNull(dao.host(hostId)) { "服务器不存在" }
-        val route = jumpRoute(target, dao::host)
+        val target = requireNotNull(findHost(hostId)) { "服务器不存在" }
+        val route = jumpRoute(target, findHost)
         route.forEach { host ->
             validateHost(host)?.let { throw SshConfigurationException(it) }
         }
-        val secrets = RouteSecrets(dao, vault, gateway)
+        val secrets = RouteSecrets(vault, gateway)
         var attempt = 0
         var lastFailure: Throwable? = null
         try {
             while (attempt <= target.retryCount) {
                 try {
                     val connection = establish(target, route, gateway, secrets)
+                    if (connectionGeneration.get() != generationAtStart) {
+                        connection.close()
+                        throw IllegalStateException("SSH connection attempt was superseded by disconnect")
+                    }
                     connections[hostId]?.close()
                     connections[hostId] = connection
-                    return@withContext connection
+                    return connection
                 } catch (failure: Throwable) {
                     secrets.wipeEphemeral()
                     lastFailure = failure
@@ -72,6 +102,17 @@ class SshConnectionManager(
 
     fun isConnected(hostId: String): Boolean =
         connections[hostId]?.let { connection -> runCatching { connection.checkOpen() }.isSuccess } == true
+
+    fun closeAllConnections() {
+        detachAllConnections().forEach { it.close() }
+    }
+
+    internal fun detachAllConnections(): List<SharedSshConnection> {
+        connectionGeneration.incrementAndGet()
+        val detached = connections.values.toList()
+        connections.clear()
+        return detached
+    }
 
     private fun establish(
         target: HostRecord,
@@ -100,14 +141,14 @@ class SshConnectionManager(
                         requestedHostname = endpoint.hostname,
                         requestedPort = endpoint.port,
                         read = {
-                            dao.knownHost(endpoint.hostname, endpoint.port)?.let {
+                            findKnownHost(endpoint.hostname, endpoint.port)?.let {
                                 HostPin(it.algorithm, it.fingerprint)
                             }
                         },
                         save = { pin ->
                             val now = System.currentTimeMillis()
-                            val existing = dao.knownHost(endpoint.hostname, endpoint.port)
-                            dao.saveKnownHost(KnownHostRecord().apply {
+                            val existing = findKnownHost(endpoint.hostname, endpoint.port)
+                            persistKnownHost(KnownHostRecord().apply {
                                 hostname = endpoint.hostname
                                 port = endpoint.port
                                 algorithm = pin.algorithm
@@ -175,7 +216,8 @@ class SshConnectionManager(
             return
         }
 
-        val identity = requireNotNull(dao.identity(endpoint.identityId)) { "SSH 身份不存在" }
+        val identityId = requireNotNull(endpoint.identityId) { "未配置 SSH 身份" }
+        val identity = requireNotNull(findIdentity(identityId)) { "SSH 身份不存在" }
         val pem = vault.decrypt("identity:${identity.id}", identity.encryptedPrivateKey)
         try {
             val key = SshKeys.loadWithPassphraseRequest(client, pem) {
@@ -208,14 +250,12 @@ class SshConnectionManager(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        connections.values.forEach { it.close() }
-        connections.clear()
+        closeAllConnections()
     }
 }
 
 private class RouteSecrets(
-    private val dao: StoreDao,
-    private val vault: CredentialVault,
+    private val vault: SecretCipher,
     private val gateway: ConnectionPromptGateway,
 ) {
     private val passwords = mutableMapOf<String, CharArray>()

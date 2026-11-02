@@ -10,17 +10,29 @@ generated 2026-11-03 Asia/Shanghai
 
 Files:
 
-- `app-server.schema.json`: complete generated schema bundle.
-- `app-server-v2.schema.json`: generated v2 schema bundle.
+- `app-server.schema.json`: generated stable protocol bundle.
+- `app-server-v2.schema.json`: generated stable v2 protocol bundle.
+- `app-server-experimental.schema.json`: generated bundle including experimental APIs.
+- `app-server-v2-experimental.schema.json`: generated v2 bundle including experimental
+  APIs. CodexDeck initializes with `experimentalApi: true`, so fields such as named
+  permission profiles and collaboration mode must be validated against this file.
 
-Regenerate both with the same Codex CLI version used by the development host:
+Regenerate all four with the same Codex CLI version used by the development host:
 
 ```sh
-tmp_dir="$(mktemp -d)"
-codex app-server generate-json-schema --out "$tmp_dir"
-cp "$tmp_dir/codex_app_server_protocol.schemas.json" schemas/app-server.schema.json
-cp "$tmp_dir/codex_app_server_protocol.v2.schemas.json" schemas/app-server-v2.schema.json
-rm -rf "$tmp_dir"
+stable_dir="$(mktemp -d)"
+experimental_dir="$(mktemp -d)"
+codex app-server generate-json-schema --out "$stable_dir"
+codex app-server generate-json-schema --experimental --out "$experimental_dir"
+cp "$stable_dir/codex_app_server_protocol.schemas.json" \
+  schemas/app-server.schema.json
+cp "$stable_dir/codex_app_server_protocol.v2.schemas.json" \
+  schemas/app-server-v2.schema.json
+cp "$experimental_dir/codex_app_server_protocol.schemas.json" \
+  schemas/app-server-experimental.schema.json
+cp "$experimental_dir/codex_app_server_protocol.v2.schemas.json" \
+  schemas/app-server-v2-experimental.schema.json
+rm -rf "$stable_dir" "$experimental_dir"
 ```
 
 Schemas are versioned with Codex, not with CodexDeck. When a remote host upgrades

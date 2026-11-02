@@ -31,6 +31,11 @@ public class HostRecord {
     @NonNull public byte[] encryptedPassword = new byte[0];
     @Nullable public String jumpHostId;
     @NonNull public String codexExecutable = "codex";
+    @NonNull @ColumnInfo(defaultValue = "'ssh'") public String appServerTransport = "ssh";
+    @NonNull @ColumnInfo(defaultValue = "''") public String appServerUrl = "";
+    @NonNull @ColumnInfo(defaultValue = "X''") public byte[] encryptedAppServerToken = new byte[0];
+    @ColumnInfo(defaultValue = "0") public boolean webSocketViaSsh = false;
+    @ColumnInfo(defaultValue = "0") public boolean allowInsecureWebSocket = false;
     public int connectTimeoutMs = 15000;
     public int keepAliveSeconds = 60;
     public int retryCount = 1;

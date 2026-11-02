@@ -9,9 +9,11 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -22,6 +24,12 @@ import org.junit.Test
 
 class AppServerClientTest {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+
+    @Test
+    fun requestIdsPreserveNumericAndStringWireTypes() {
+        assertEquals(RequestId.Number(1), RequestId.fromJson(JsonPrimitive(1)))
+        assertEquals(RequestId.Text("1"), RequestId.fromJson(JsonPrimitive("1")))
+    }
 
     @Test
     fun initializeUsesOmahaCompatibleEnvelopeAndPaginatesThreads() = runTest {
@@ -134,6 +142,203 @@ class AppServerClientTest {
         assertEquals("commandExecution", item?.type)
         assertEquals("pwd", item?.command)
         assertEquals(0, item?.exitCode)
+    }
+
+    @Test
+    fun startTurnSendsInlineImagesAsV2UserInput() = runTest {
+        val transport = FakeTransport()
+        val client = AppServerClient(
+            transport = transport,
+            clientInfo = ClientInfo(version = "test"),
+            scope = this,
+        )
+        val initialize = async { client.initialize() }
+        transport.emit(ok(transport.receiveRequest().id, buildJsonObject {}))
+        initialize.await()
+        transport.receiveNotification()
+
+        val started = async {
+            client.startTurn(
+                threadId = "thread-1",
+                text = "",
+                imageDataUrls = listOf("data:image/png;base64,AAA"),
+                options = TurnOptions(
+                    sandboxPolicy = buildJsonObject { put("type", "dangerFullAccess") },
+                    permissionProfile = ":workspace",
+                ),
+            )
+        }
+        val request = transport.receiveRequest()
+        assertEquals(":workspace", request.params["permissions"]?.jsonPrimitive?.content)
+        assertFalse(request.params.containsKey("sandboxPolicy"))
+        val input = request.params["input"]!!.jsonArray
+        assertEquals(1, input.size)
+        assertEquals("image", input[0].jsonObject["type"]?.jsonPrimitive?.content)
+        assertEquals(
+            "data:image/png;base64,AAA",
+            input[0].jsonObject["url"]?.jsonPrimitive?.content,
+        )
+        transport.emit(ok(request.id, buildJsonObject {
+            put("turn", buildJsonObject {
+                put("id", "turn-1")
+                put("status", "inProgress")
+                put("items", buildJsonArray {})
+            })
+        }))
+        assertEquals("turn-1", started.await().id)
+        client.close()
+    }
+
+    @Test
+    fun resumeUsesNamedPermissionsInsteadOfLegacySandboxWhenBothAreProvided() = runTest {
+        val transport = FakeTransport()
+        val client = AppServerClient(
+            transport = transport,
+            clientInfo = ClientInfo(version = "test"),
+            scope = this,
+        )
+        val initialize = async { client.initialize() }
+        transport.emit(ok(transport.receiveRequest().id, buildJsonObject {}))
+        initialize.await()
+        transport.receiveNotification()
+
+        val resumed = async {
+            client.resumeThread(
+                threadId = "thread-1",
+                sandbox = "danger-full-access",
+                permissionProfile = ":workspace",
+            )
+        }
+        val request = transport.receiveRequest()
+        assertEquals(":workspace", request.params["permissions"]?.jsonPrimitive?.content)
+        assertFalse(request.params.containsKey("sandbox"))
+        transport.emit(
+            ok(
+                request.id,
+                buildJsonObject {
+                    put("thread", threadJson("thread-1", "Test"))
+                    put("model", "test-model")
+                    put("modelProvider", "test-provider")
+                    put("cwd", "/repo")
+                    put("approvalPolicy", "on-request")
+                    put("approvalsReviewer", "user")
+                    put("sandbox", buildJsonObject { put("type", "workspaceWrite") })
+                },
+            ),
+        )
+        resumed.await()
+        client.close()
+    }
+
+    @Test
+    fun parsesMultiClientSettingsResolutionAndTurnDiffEvents() = runTest {
+        val transport = FakeTransport()
+        val client = AppServerClient(
+            transport = transport,
+            clientInfo = ClientInfo(version = "test"),
+            scope = this,
+        )
+        val initialize = async { client.initialize() }
+        transport.emit(ok(transport.receiveRequest().id, buildJsonObject {}))
+        initialize.await()
+        transport.receiveNotification()
+
+        val settingsEvent = async {
+            client.events.first { it is CodexEvent.ThreadSettingsChanged }
+                as CodexEvent.ThreadSettingsChanged
+        }
+        transport.emit(
+            buildJsonObject {
+                put("method", "thread/settings/updated")
+                put("params", buildJsonObject {
+                    put("threadId", "thread-1")
+                    put("threadSettings", buildJsonObject {
+                        put("model", "gpt-test")
+                        put("modelProvider", "provider")
+                        put("effort", "high")
+                        put("cwd", "/repo")
+                        put("approvalPolicy", buildJsonObject {
+                            put("granular", buildJsonObject {
+                                put("sandbox_approval", true)
+                                put("rules", true)
+                                put("mcp_elicitations", false)
+                            })
+                        })
+                        put("approvalsReviewer", "user")
+                        put("sandboxPolicy", buildJsonObject {
+                            put("type", "workspaceWrite")
+                            put("networkAccess", true)
+                        })
+                        put("activePermissionProfile", buildJsonObject { put("id", "dev") })
+                        put("collaborationMode", buildJsonObject {
+                            put("mode", "plan")
+                            put("settings", buildJsonObject { put("model", "gpt-test") })
+                        })
+                    })
+                })
+            },
+        )
+        val settings = settingsEvent.await().settings
+        assertEquals("gpt-test", settings.model)
+        assertEquals("workspace-write", settings.sandboxMode)
+        assertEquals(
+            "true",
+            (settings.sandboxPolicy?.get("networkAccess") as JsonPrimitive).content,
+        )
+        assertTrue((settings.approvalPolicy as JsonObject).containsKey("granular"))
+        assertEquals("plan", settings.collaborationMode)
+
+        val resolvedEvent = async {
+            client.events.first { it is CodexEvent.ApprovalResolved }
+                as CodexEvent.ApprovalResolved
+        }
+        transport.emit(
+            buildJsonObject {
+                put("method", "serverRequest/resolved")
+                put("params", buildJsonObject {
+                    put("threadId", "thread-1")
+                    put("requestId", 77)
+                })
+            },
+        )
+        assertEquals(RequestId.Number(77), resolvedEvent.await().requestId)
+
+        val diffEvent = async {
+            client.events.first { it is CodexEvent.TurnDiffChanged }
+                as CodexEvent.TurnDiffChanged
+        }
+        transport.emit(
+            buildJsonObject {
+                put("method", "turn/diff/updated")
+                put("params", buildJsonObject {
+                    put("threadId", "thread-1")
+                    put("turnId", "turn-1")
+                    put("diff", "diff --git a/a b/a")
+                })
+            },
+        )
+        assertEquals("turn-1", diffEvent.await().turnId)
+
+        val retryEvent = async {
+            client.events.first { it is CodexEvent.ServerError }
+                as CodexEvent.ServerError
+        }
+        transport.emit(
+            buildJsonObject {
+                put("method", "error")
+                put("params", buildJsonObject {
+                    put("threadId", "thread-1")
+                    put("turnId", "turn-1")
+                    put("willRetry", true)
+                    put("error", buildJsonObject {
+                        put("message", "temporary failure")
+                        put("codexErrorInfo", "other")
+                    })
+                })
+            },
+        )
+        assertTrue(retryEvent.await().willRetry)
+        client.close()
     }
 
     private fun threadJson(id: String, title: String): JsonObject = buildJsonObject {

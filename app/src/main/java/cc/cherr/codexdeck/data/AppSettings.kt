@@ -36,4 +36,25 @@ class SettingsStore(context: Context) {
             putBoolean("keep_screen_on_terminal", settings.keepScreenOnInTerminal)
         }
     }
+
+    fun lastHostId(): String? =
+        preferences.getString("last_host_id", null)?.takeIf(String::isNotBlank)
+
+    fun lastThreadId(): String? =
+        preferences.getString("last_thread_id", null)?.takeIf(String::isNotBlank)
+
+    fun rememberConnection(hostId: String, threadId: String?) {
+        preferences.edit {
+            putString("last_host_id", hostId)
+            if (threadId == null) remove("last_thread_id")
+            else putString("last_thread_id", threadId)
+        }
+    }
+
+    fun clearConnection() {
+        preferences.edit {
+            remove("last_host_id")
+            remove("last_thread_id")
+        }
+    }
 }
