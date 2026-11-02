@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install build platform
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build isolated OpenSSH test image
+        run: >-
+          docker build
+          --file scripts/ssh-test.Dockerfile
+          --tag codexdeck-ssh-test:ci
+          .
+
+      - name: Run real SSH and ProxyJump integration test
+        env:
+          SSH_TEST_DOCKER_IMAGE: codexdeck-ssh-test:ci
+          SSH_TEST_DEBUG: "1"
+        run: |
+          python3 scripts/ssh_test_server.py -- \
+            ./gradlew :app:testDebugUnitTest \
+              --tests 'cc.cherr.codexdeck.SshConnectionIntegrationTest' \
+              --stacktrace
+
+      - name: Test and lint
+        run: |
+          ./gradlew \
+            :protocol:test \
+            :app:testDebugUnitTest \
+            :terminal-emulator:testDebugUnitTest \
+            :terminal-view:testDebugUnitTest \
+            :app:lintDebug \
+            --stacktrace
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Verify installable debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$apk"
+          apksigner="$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | sort -V | tail -n 1)"
+          "$apksigner" verify --verbose "$apk"
+          aapt2="$(find "${ANDROID_HOME}/build-tools" -name aapt2 -type f | sort -V | tail -n 1)"
+          "$aapt2" dump badging "$apk" | grep -q "package: name='cc.cherr.codexdeck.debug'"
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: codexdeck-debug-${{ github.sha }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

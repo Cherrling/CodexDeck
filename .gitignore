@@ -3,6 +3,8 @@
 .kotlin/
 .research/
 **/build/
+__pycache__/
+*.py[cod]
 local.properties
 *.iml
 *.jks

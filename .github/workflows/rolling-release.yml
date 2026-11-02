@@ -1,0 +1,458 @@
+name: Rolling pre-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: Optional release summary shown in the Rolling Pre-release
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codexdeck-rolling-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and update rolling release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install build platform
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build isolated OpenSSH release-test image
+        run: >-
+          docker build
+          --file scripts/ssh-test.Dockerfile
+          --tag codexdeck-ssh-test:release
+          .
+
+      - name: Run real SSH and ProxyJump release test
+        env:
+          SSH_TEST_DOCKER_IMAGE: codexdeck-ssh-test:release
+          SSH_TEST_DEBUG: "1"
+        run: |
+          python3 scripts/ssh_test_server.py -- \
+            ./gradlew :app:testDebugUnitTest \
+              --tests 'cc.cherr.codexdeck.SshConnectionIntegrationTest' \
+              --stacktrace
+
+      - name: Restore debug fallback signing identity
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: codexdeck-rolling-debug-keystore-v1
+
+      - name: Generate version metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit7="$(git rev-parse --short=7 HEAD)"
+          timestamp="$(TZ=Asia/Shanghai date +%Y%m%d%H%M%S)"
+          version="v0.1-${commit7}-${timestamp}"
+          # GITHUB_RUN_NUMBER is monotonic for this workflow and remains stable on reruns,
+          # unlike commit counts that can move backwards after a history rewrite.
+          version_code="$((100000 + GITHUB_RUN_NUMBER))"
+          if (( version_code > 2147483647 )); then
+            echo "versionCode is outside the Android integer range" >&2
+            exit 1
+          fi
+          {
+            echo "commit7=${commit7}"
+            echo "timestamp=${timestamp}"
+            echo "version=${version}"
+            echo "version_code=${version_code}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Select signing mode
+        id: signing
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          configured=0
+          for value in "$KEYSTORE_BASE64" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD"; do
+            if [[ -n "$value" ]]; then
+              configured=$((configured + 1))
+            fi
+          done
+          if [[ "$configured" -eq 4 ]]; then
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+          elif [[ "$configured" -eq 0 ]]; then
+            echo "mode=debug" >> "$GITHUB_OUTPUT"
+          else
+            echo "Only some Android signing secrets are configured." >&2
+            echo "Configure all four secrets or remove all of them for an explicit debug fallback." >&2
+            exit 1
+          fi
+
+      - name: Test and lint
+        run: |
+          ./gradlew \
+            :protocol:test \
+            :app:testDebugUnitTest \
+            :terminal-emulator:testDebugUnitTest \
+            :terminal-view:testDebugUnitTest \
+            :app:lintDebug \
+            --stacktrace
+
+      - name: Build APK
+        shell: bash
+        env:
+          SIGNING_MODE: ${{ steps.signing.outputs.mode }}
+          VERSION_NAME: ${{ steps.metadata.outputs.version }}
+          VERSION_CODE: ${{ steps.metadata.outputs.version_code }}
+          BUILD_TIMESTAMP: ${{ steps.metadata.outputs.timestamp }}
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export CODEXDECK_VERSION_NAME="$VERSION_NAME"
+          export CODEXDECK_VERSION_CODE="$VERSION_CODE"
+          export CODEXDECK_BUILD_TIME="${BUILD_TIMESTAMP} (UTC+8)"
+          export CODEXDECK_SOURCE_REVISION="${GITHUB_SHA}"
+
+          mkdir -p dist
+          if [[ "$SIGNING_MODE" == "release" ]]; then
+            keystore_path="${RUNNER_TEMP}/codexdeck-release.keystore"
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+            export CODEXDECK_KEYSTORE_PATH="$keystore_path"
+            export CODEXDECK_KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
+            export CODEXDECK_KEY_ALIAS="$KEY_ALIAS"
+            export CODEXDECK_KEY_PASSWORD="$KEY_PASSWORD"
+            ./gradlew :app:assembleRelease --stacktrace
+            apk="app/build/outputs/apk/release/app-release.apk"
+            artifact="codex-android-${VERSION_NAME}.apk"
+          else
+            ./gradlew :app:assembleDebug --stacktrace
+            apk="app/build/outputs/apk/debug/app-debug.apk"
+            artifact="codex-android-${VERSION_NAME}-debug.apk"
+          fi
+
+          test -s "$apk"
+          apksigner="$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | sort -V | tail -n 1)"
+          "$apksigner" verify --verbose "$apk"
+          cp "$apk" "dist/$artifact"
+          cp "$apk" dist/codex-android-latest.apk
+          (
+            cd dist
+            sha256sum "$artifact" codex-android-latest.apk > SHA256SUMS
+          )
+          jq -n \
+            --arg version "$VERSION_NAME" \
+            --arg commit "$GITHUB_SHA" \
+            --arg commit7 "${{ steps.metadata.outputs.commit7 }}" \
+            --arg versionCode "${{ steps.metadata.outputs.version_code }}" \
+            --arg timestamp "${BUILD_TIMESTAMP} (UTC+8)" \
+            --arg variant "$SIGNING_MODE" \
+            --arg artifact "$artifact" \
+            '{version: $version, versionCode: ($versionCode | tonumber), commit: $commit, commit7: $commit7, timestamp: $timestamp, variant: $variant, artifact: $artifact}' \
+            > dist/build-info.json
+
+      - name: Generate release notes
+        shell: bash
+        env:
+          VERSION_NAME: ${{ steps.metadata.outputs.version }}
+          SIGNING_MODE: ${{ steps.signing.outputs.mode }}
+          RELEASE_SUMMARY: ${{ inputs.release_notes }}
+          COMMIT7: ${{ steps.metadata.outputs.commit7 }}
+          VERSION_CODE: ${{ steps.metadata.outputs.version_code }}
+          BUILD_TIMESTAMP: ${{ steps.metadata.outputs.timestamp }}
+        run: |
+          set -euo pipefail
+          summary="$RELEASE_SUMMARY"
+          if [[ -z "$summary" ]]; then
+            summary="$(git log -1 --pretty='- %s')"
+          fi
+          if [[ "$SIGNING_MODE" == "release" ]]; then
+            variant="Signed release APK (applicationId: cc.cherr.codexdeck)"
+            debug_limitation=""
+          else
+            variant="DEBUG APK (applicationId: cc.cherr.codexdeck.debug; not signed with the release key)"
+            debug_limitation="- The debug fallback uses a cached debug key on a best-effort basis; cache eviction can require uninstalling before update."
+          fi
+          cat > release-notes.md <<EOF
+          # CodexDeck Rolling Pre-release
+
+          - Version: \`${VERSION_NAME}\`
+          - Android versionCode: \`${VERSION_CODE}\`
+          - Commit: \`${COMMIT7}\` (\`${GITHUB_SHA}\`)
+          - Build time: \`${BUILD_TIMESTAMP}\` (UTC+8)
+          - Build variant: ${variant}
+
+          ## Changes
+
+          ${summary}
+
+          ## Installation
+
+          Download \`codex-android-latest.apk\` for automation-friendly access, or the
+          versioned APK from the same release. Verify downloads with \`SHA256SUMS\`.
+
+          ## Known limitations
+
+          - SSH, ProxyJump, terminal IME/TUI behavior, Android background recovery, and
+            real-device streaming still require device/server integration validation.
+          - PC/Android live-runtime sharing requires both clients to connect to the same
+            app-server process; separate app-server processes do not share active Turns.
+          - A debug fallback has a different applicationId and cannot update a
+            release-signed installation.
+          ${debug_limitation}
+          EOF
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codexdeck-rolling-${{ steps.metadata.outputs.commit7 }}
+          path: |
+            dist/*
+            release-notes.md
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Update rolling release with rollback checkpoint
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_NAME: ${{ steps.metadata.outputs.version }}
+          SIGNING_MODE: ${{ steps.signing.outputs.mode }}
+          VERSION_CODE: ${{ steps.metadata.outputs.version_code }}
+          COMMIT7: ${{ steps.metadata.outputs.commit7 }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          artifact="codex-android-${VERSION_NAME}.apk"
+          if [[ "$SIGNING_MODE" == "debug" ]]; then
+            artifact="codex-android-${VERSION_NAME}-debug.apk"
+          fi
+
+          previous_tag="$(git ls-remote origin refs/tags/rolling | awk '{print $1}')"
+          release_exists=false
+          if gh release view rolling >/dev/null 2>&1; then
+            release_exists=true
+          fi
+
+          if [[ "$release_exists" == false ]]; then
+            if [[ -n "$previous_tag" ]]; then
+              echo "The rolling tag exists without a matching release; refusing to replace an ambiguous publication." >&2
+              exit 1
+            fi
+
+            tag_created=false
+            cleanup_initial_release() {
+              status=$?
+              trap - EXIT
+              if [[ "$status" -ne 0 && "$tag_created" == true ]]; then
+                gh release delete rolling --yes --cleanup-tag >/dev/null 2>&1 || \
+                  git push origin :refs/tags/rolling >/dev/null 2>&1 || true
+              fi
+              exit "$status"
+            }
+            trap cleanup_initial_release EXIT
+
+            git tag -f rolling "$GITHUB_SHA"
+            git push origin refs/tags/rolling
+            tag_created=true
+            gh release create rolling \
+              --verify-tag \
+              --draft \
+              --title "Rolling Pre-release" \
+              --prerelease \
+              --notes-file release-notes.md \
+              dist/*
+            gh release edit rolling --draft=false --prerelease
+            trap - EXIT
+            exit 0
+          fi
+
+          if [[ -z "$previous_tag" ]]; then
+            echo "The rolling release exists without a rolling tag; refusing to continue." >&2
+            exit 1
+          fi
+
+          backup_dir="${RUNNER_TEMP}/rolling-release-backup"
+          verify_dir="${RUNNER_TEMP}/rolling-release-preflight"
+          rm -rf "$backup_dir" "$verify_dir"
+          mkdir -p "$backup_dir" "$verify_dir"
+          gh release download rolling \
+            --dir "$backup_dir" \
+            --clobber \
+            --pattern codex-android-latest.apk \
+            --pattern SHA256SUMS \
+            --pattern build-info.json
+          test -s "$backup_dir/codex-android-latest.apk"
+          test -s "$backup_dir/SHA256SUMS"
+          test -s "$backup_dir/build-info.json"
+          gh release view rolling --json body --jq '.body // ""' > "$backup_dir/release-notes.md"
+
+          tag_moved=false
+          fixed_assets_changed=false
+          committed=false
+          rollback_publication() {
+            status=$?
+            trap - EXIT
+            if [[ "$status" -ne 0 && "$committed" == false ]]; then
+              set +e
+              echo "Rolling publication failed; restoring the previous tag and fixed-name assets." >&2
+              if [[ "$tag_moved" == true ]]; then
+                git push --force origin "$previous_tag:refs/tags/rolling"
+              fi
+              if [[ "$fixed_assets_changed" == true ]]; then
+                gh release upload rolling \
+                  "$backup_dir/codex-android-latest.apk" \
+                  "$backup_dir/SHA256SUMS" \
+                  "$backup_dir/build-info.json" \
+                  --clobber
+                gh release edit rolling \
+                  --title "Rolling Pre-release" \
+                  --prerelease \
+                  --notes-file "$backup_dir/release-notes.md"
+              fi
+              gh release delete-asset rolling "$artifact" --yes >/dev/null 2>&1
+            fi
+            exit "$status"
+          }
+          trap rollback_publication EXIT
+
+          # The versioned APK is additive and cannot replace a working download.
+          gh release upload rolling "dist/$artifact"
+
+          # Move the visible tag only after the complete new build is uploaded.
+          git tag -f rolling "$GITHUB_SHA"
+          git push --force origin refs/tags/rolling
+          tag_moved=true
+
+          fixed_assets_changed=true
+          gh release upload rolling \
+            dist/codex-android-latest.apk \
+            dist/SHA256SUMS \
+            dist/build-info.json \
+            --clobber
+          gh release edit rolling \
+            --title "Rolling Pre-release" \
+            --prerelease \
+            --notes-file release-notes.md
+
+          remote_tag_sha="$(git ls-remote origin refs/tags/rolling | awk '{print $1}')"
+          test "$remote_tag_sha" = "$GITHUB_SHA"
+          gh release view rolling --json tagName,isPrerelease,assets > "$verify_dir/release.json"
+          jq -e '.tagName == "rolling" and .isPrerelease == true' "$verify_dir/release.json"
+          jq -e --arg apk "$artifact" \
+            '.assets | any(.name == $apk) and any(.name == "codex-android-latest.apk") and any(.name == "SHA256SUMS") and any(.name == "build-info.json")' \
+            "$verify_dir/release.json"
+          gh release download rolling \
+            --dir "$verify_dir" \
+            --clobber \
+            --pattern "$artifact" \
+            --pattern codex-android-latest.apk \
+            --pattern SHA256SUMS \
+            --pattern build-info.json
+          (
+            cd "$verify_dir"
+            sha256sum -c SHA256SUMS
+            jq -e \
+              --arg version "$VERSION_NAME" \
+              --arg commit "$GITHUB_SHA" \
+              --arg commit7 "$COMMIT7" \
+              --argjson versionCode "$VERSION_CODE" \
+              '.version == $version and .commit == $commit and .commit7 == $commit7 and .versionCode == $versionCode' \
+              build-info.json
+          )
+          cmp dist/SHA256SUMS "$verify_dir/SHA256SUMS"
+          cmp dist/"$artifact" "$verify_dir/$artifact"
+
+          committed=true
+          trap - EXIT
+
+          # Cleanup is deliberately post-commit. A cleanup failure must not roll back a
+          # publication that was already proven valid.
+          gh release view rolling --json assets --jq '.assets[].name' |
+            while IFS= read -r asset; do
+              case "$asset" in
+                "$artifact"|codex-android-latest.apk|SHA256SUMS|build-info.json)
+                  ;;
+                *.apk)
+                  gh release delete-asset rolling "$asset" --yes || \
+                    echo "Warning: could not remove stale asset $asset" >&2
+                  ;;
+              esac
+            done
+
+      - name: Verify rolling release metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_NAME: ${{ steps.metadata.outputs.version }}
+          SIGNING_MODE: ${{ steps.signing.outputs.mode }}
+          VERSION_CODE: ${{ steps.metadata.outputs.version_code }}
+          COMMIT7: ${{ steps.metadata.outputs.commit7 }}
+        run: |
+          set -euo pipefail
+          artifact="codex-android-${VERSION_NAME}.apk"
+          if [[ "$SIGNING_MODE" == "debug" ]]; then
+            artifact="codex-android-${VERSION_NAME}-debug.apk"
+          fi
+          remote_tag_sha="$(git ls-remote origin refs/tags/rolling | awk '{print $1}')"
+          test "$remote_tag_sha" = "$GITHUB_SHA"
+          gh release view rolling --json tagName,isPrerelease,assets > release-verification.json
+          jq -e '.tagName == "rolling" and .isPrerelease == true' release-verification.json
+          jq -e --arg apk "$artifact" \
+            '.assets | any(.name == $apk) and any(.name == "codex-android-latest.apk") and any(.name == "SHA256SUMS") and any(.name == "build-info.json")' \
+            release-verification.json
+
+          verify_dir="${RUNNER_TEMP}/rolling-verification"
+          rm -rf "$verify_dir"
+          mkdir -p "$verify_dir"
+          gh release download rolling \
+            --dir "$verify_dir" \
+            --clobber \
+            --pattern "$artifact" \
+            --pattern codex-android-latest.apk \
+            --pattern SHA256SUMS \
+            --pattern build-info.json
+          (
+            cd "$verify_dir"
+            sha256sum -c SHA256SUMS
+            jq -e \
+              --arg version "$VERSION_NAME" \
+              --arg commit "$GITHUB_SHA" \
+              --arg commit7 "$COMMIT7" \
+              --argjson versionCode "$VERSION_CODE" \
+              '.version == $version and .commit == $commit and .commit7 == $commit7 and .versionCode == $versionCode' \
+              build-info.json
+          )
+          cmp dist/SHA256SUMS "$verify_dir/SHA256SUMS"
+          cmp dist/"$artifact" "$verify_dir/$artifact"
