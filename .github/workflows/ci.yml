@@ -21,22 +21,27 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install build platform
-        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager_bin="$(find "${ANDROID_HOME}/cmdline-tools" -name sdkmanager -type f | sort -V | tail -n 1)"
+          test -x "$sdkmanager_bin"
+          set +o pipefail
+          yes | "$sdkmanager_bin" --licenses >/dev/null || true
+          set -o pipefail
+          "$sdkmanager_bin" "platforms;android-36" "build-tools;35.0.0"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Build isolated OpenSSH test image
         run: >-
@@ -80,7 +85,7 @@ jobs:
           "$aapt2" dump badging "$apk" | grep -q "package: name='cc.cherr.codexdeck.debug'"
 
       - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: codexdeck-debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/app-debug.apk
