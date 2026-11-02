@@ -206,6 +206,12 @@ Schema files under `schemas/` are generated from the pinned official source; see
 OpenSSH/ProxyJump/PTY integration test, lint, and a debug APK build for every Pull
 Request and push to `main`.
 
+Gradle dependencies and local build-cache entries are shared through the GitHub Actions
+cache backend. The Docker OpenSSH fixture uses Buildx `type=gha,mode=max`, so the base
+image and the OpenSSH installation layer are reused by both CI and Rolling Release.
+The rolling Debug-fallback keystore is cached separately for update-compatible debug
+installs. Android SDK files and generated APKs are deliberately not cached.
+
 `.github/workflows/rolling-release.yml` is manually triggered. It:
 
 1. runs protocol, app, terminal, and real Docker OpenSSH/ProxyJump/PTY tests plus lint;
@@ -252,6 +258,9 @@ loses non-exported local state.
   process-death restoration still require device validation.
 - No external production SSH server, network interruption lab, or Android device was
   available; those paths still need real-device and deployment validation.
+- The current AGP 8.13 toolchain compiles and targets API 36. The CI runner also exposes
+  API 37, so `OldTargetApi` is explicitly suppressed until the separate AGP 9/Kotlin
+  migration is completed and device-tested.
 - MCP, Skills, and Plugins are currently inventory views. MCP OAuth, plugin
   install/remove, Skills configuration, and rich app/resource UIs are not complete.
 - Markdown rendering handles paragraphs and fenced code but does not yet provide full

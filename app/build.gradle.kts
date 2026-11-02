@@ -105,6 +105,9 @@ android {
             "AndroidGradlePluginVersion",
             "GradleDependency",
             "NewerVersionAvailable",
+            // AGP 8.13 supports compileSdk 36; the hosted runner also has API 37, which
+            // would otherwise fail lint until the separate AGP 9/Kotlin migration lands.
+            "OldTargetApi",
             // Bouncy Castle contains internal trust-manager adapters for certificate parsing;
             // it does not configure this app's HTTPS/WebSocket trust policy.
             "TrustAllX509TrustManager",
