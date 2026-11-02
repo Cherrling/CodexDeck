@@ -210,7 +210,9 @@ Gradle dependencies and local build-cache entries are shared through the GitHub 
 cache backend. The Docker OpenSSH fixture uses Buildx `type=gha,mode=max`, so the base
 image and the OpenSSH installation layer are reused by both CI and Rolling Release.
 The rolling Debug-fallback keystore is cached separately for update-compatible debug
-installs. Android SDK files and generated APKs are deliberately not cached.
+installs. The workflow generates `.ci/codexdeck-debug.keystore` only on a cache miss,
+passes it explicitly to Gradle, and restores the same key on later Rolling builds.
+Android SDK files and generated APKs are deliberately not cached.
 
 `.github/workflows/rolling-release.yml` is manually triggered. It:
 
@@ -238,10 +240,10 @@ absent, the workflow publishes an APK whose filename ends in `-debug.apk`; its
 applicationId is `.debug`, and Release Notes explicitly mark it as a Debug fallback.
 Partial signing configuration fails the workflow.
 
-The workflow caches the generated debug keystore on a best-effort basis so Rolling
-debug builds are usually update-compatible. Cache eviction can still change the
-signature. Configure the four release secrets for a guaranteed stable installation
-identity and an explicitly signed release APK.
+The workflow caches `.ci/codexdeck-debug.keystore` so Rolling debug builds preserve the
+same installation identity. Cache eviction can still require deleting the GitHub cache
+and re-establishing a key; configure the four release secrets for a guaranteed stable
+installation identity and an explicitly signed release APK.
 
 Keep the same release key for future Rolling builds. Android cannot update an installed
 APK with a different signing key; switching keys requires uninstalling the old app and
@@ -261,6 +263,9 @@ loses non-exported local state.
 - The current AGP 8.13 toolchain compiles and targets API 36. The CI runner also exposes
   API 37, so `OldTargetApi` is explicitly suppressed until the separate AGP 9/Kotlin
   migration is completed and device-tested.
+- The first published debug-fallback build used the historical default debug identity.
+  Subsequent Rolling builds use the explicitly cached `.ci` identity, so testers may need
+  one uninstall when moving from that first build. Release signing avoids this fallback.
 - MCP, Skills, and Plugins are currently inventory views. MCP OAuth, plugin
   install/remove, Skills configuration, and rich app/resource UIs are not complete.
 - Markdown rendering handles paragraphs and fenced code but does not yet provide full

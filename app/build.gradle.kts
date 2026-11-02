@@ -30,6 +30,9 @@ require(configuredVersionName.length <= 128)
 val signingPrefix = "CODEXDECK"
 val signingValues = listOf("KEYSTORE_PATH", "KEYSTORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD")
     .associateWith { providers.environmentVariable("${signingPrefix}_$it").orNull }
+val rollingDebugKeystore = providers.environmentVariable("CODEXDECK_DEBUG_KEYSTORE_PATH")
+    .orNull
+    ?.takeIf(String::isNotBlank)
 
 android {
     namespace = "cc.cherr.codexdeck"
@@ -59,6 +62,12 @@ android {
             keyAlias = signingValues["KEY_ALIAS"]
             keyPassword = signingValues["KEY_PASSWORD"]
         }
+        create("rollingDebug") {
+            rollingDebugKeystore?.let { storeFile = file(it) }
+            storePassword = providers.environmentVariable("CODEXDECK_DEBUG_KEYSTORE_PASSWORD").orNull
+            keyAlias = providers.environmentVariable("CODEXDECK_DEBUG_KEY_ALIAS").orNull
+            keyPassword = providers.environmentVariable("CODEXDECK_DEBUG_KEY_PASSWORD").orNull
+        }
     }
 
     buildTypes {
@@ -66,6 +75,9 @@ android {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
             resValue("string", "app_name", "CodexDeck Debug")
+            if (rollingDebugKeystore != null) {
+                signingConfig = signingConfigs.getByName("rollingDebug")
+            }
         }
         release {
             isDebuggable = false

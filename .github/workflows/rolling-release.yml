@@ -76,10 +76,29 @@ jobs:
               --stacktrace
 
       - name: Restore debug fallback signing identity
+        id: debug-keystore
         uses: actions/cache@v6
         with:
-          path: ~/.android/debug.keystore
+          path: .ci/codexdeck-debug.keystore
           key: codexdeck-rolling-debug-keystore-v1
+
+      - name: Create debug fallback signing identity
+        if: steps.debug-keystore.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci
+          keytool -genkeypair \
+            -keystore .ci/codexdeck-debug.keystore \
+            -storetype PKCS12 \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=CodexDeck Rolling Debug,O=CodexDeck,C=CN"
+          test -s .ci/codexdeck-debug.keystore
 
       - name: Generate version metadata
         id: metadata
@@ -169,6 +188,10 @@ jobs:
             apk="app/build/outputs/apk/release/app-release.apk"
             artifact="codex-android-${VERSION_NAME}.apk"
           else
+            export CODEXDECK_DEBUG_KEYSTORE_PATH="$PWD/.ci/codexdeck-debug.keystore"
+            export CODEXDECK_DEBUG_KEYSTORE_PASSWORD="android"
+            export CODEXDECK_DEBUG_KEY_ALIAS="androiddebugkey"
+            export CODEXDECK_DEBUG_KEY_PASSWORD="android"
             ./gradlew :app:assembleDebug --stacktrace
             apk="app/build/outputs/apk/debug/app-debug.apk"
             artifact="codex-android-${VERSION_NAME}-debug.apk"
@@ -177,6 +200,11 @@ jobs:
           test -s "$apk"
           apksigner="$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | sort -V | tail -n 1)"
           "$apksigner" verify --verbose "$apk"
+          if [[ "$SIGNING_MODE" == "debug" ]]; then
+            certificates="$("$apksigner" verify --print-certs "$apk" 2>&1)"
+            printf '%s\n' "$certificates" >&2
+            grep -Fq "CN=CodexDeck Rolling Debug" <<<"$certificates"
+          fi
           cp "$apk" "dist/$artifact"
           cp "$apk" dist/codex-android-latest.apk
           (
