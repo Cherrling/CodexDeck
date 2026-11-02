@@ -1,0 +1,36 @@
+diff --git a/third-party/termux/terminal-view/src/main/java/com/termux/view/TerminalRenderer.java b/third-party/termux/terminal-view/src/main/java/com/termux/view/TerminalRenderer.java
+index 787902c..be1ae08 100644
+--- a/third-party/termux/terminal-view/src/main/java/com/termux/view/TerminalRenderer.java
++++ b/third-party/termux/terminal-view/src/main/java/com/termux/view/TerminalRenderer.java
+@@ -24,0 +25,8 @@ public final class TerminalRenderer {
++    private int selectionForeground, selectionBackground;
++
++    /** ShellDeck opt-in selection colors. Zero retains upstream inverse selection. */
++    public void setSelectionColors(int foreground, int background) {
++        selectionForeground = foreground;
++        selectionBackground = background;
++    }
++
+@@ -150 +158 @@ public final class TerminalRenderer {
+-                            cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection);
++                            cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection, lastRunInsideSelection);
+@@ -178 +186 @@ public final class TerminalRenderer {
+-                measuredWidthForRun, cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection);
++                measuredWidthForRun, cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection, lastRunInsideSelection);
+@@ -184 +192 @@ public final class TerminalRenderer {
+-                             long textStyle, boolean reverseVideo) {
++                             long textStyle, boolean reverseVideo, boolean selected) {
+@@ -211,0 +220,7 @@ public final class TerminalRenderer {
++        // Selection is a UI overlay; it does not change terminal cells or OSC palette queries.
++        if (selected && selectionForeground != 0 && selectionBackground != 0) {
++            foreColor = selectionForeground;
++            backColor = selectionBackground;
++            cursor = 0;
++        }
++
+@@ -225 +240 @@ public final class TerminalRenderer {
+-        if (backColor != palette[TextStyle.COLOR_INDEX_BACKGROUND]) {
++        if (backColor != palette[TextStyle.COLOR_INDEX_BACKGROUND] || (selected && selectionForeground != 0 && selectionBackground != 0)) {
+@@ -240 +255 @@ public final class TerminalRenderer {
+-            if (dim) {
++            if (dim && !(selected && selectionForeground != 0 && selectionBackground != 0)) {

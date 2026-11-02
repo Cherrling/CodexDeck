@@ -1,0 +1,5 @@
+{
+  "terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java": "abca963cb5648adcead1684a26162e15bc6aef0c3744036c5de3ae69f9429350",
+  "terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java": "e78c3aa5b4ed8015bdb4210d70d16149123fcf9c25a7c0f9880849c535c34c64",
+  "terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java": "163547edc21196095b28e39b05979d46cbd33549c9d61c9a4b8d48bc07bf8023"
+}

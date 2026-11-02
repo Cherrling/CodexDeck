@@ -1,0 +1,197 @@
+diff --git a/third-party/termux/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java b/third-party/termux/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
+index 26ce712..95f22cb 100644
+--- a/third-party/termux/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
++++ b/third-party/termux/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
+@@ -361,7 +361,10 @@ public final class TerminalBuffer {
+                             lastNonSpaceIndex = i + 1;
+                 }
+ 
++                int lastLink = oldLine.lastHyperlinkColumn();
++                if (lastLink >= 0) lastNonSpaceIndex = Math.max(lastNonSpaceIndex, oldLine.findStartOfColumn(lastLink + 1));
+                 int currentOldCol = 0;
++                int hyperlinkAtCol = 0;
+                 long styleAtCol = 0;
+                 for (int i = 0; i < lastNonSpaceIndex; i++) {
+                     // Note that looping over java character, not cells.
+@@ -369,7 +372,10 @@ public final class TerminalBuffer {
+                     int codePoint = (Character.isHighSurrogate(c)) ? Character.toCodePoint(c, oldLine.mText[++i]) : c;
+                     int displayWidth = WcWidth.width(codePoint);
+                     // Use the last style if this is a zero-width character:
+-                    if (displayWidth > 0) styleAtCol = oldLine.getStyle(currentOldCol);
++                    if (displayWidth > 0) {
++                        styleAtCol = oldLine.getStyle(currentOldCol);
++                        hyperlinkAtCol = oldLine.getHyperlink(currentOldCol);
++                    }
+ 
+                     // Line wrap as necessary:
+                     if (currentOutputExternalColumn + displayWidth > mColumns) {
+@@ -385,7 +391,7 @@ public final class TerminalBuffer {
+ 
+                     int offsetDueToCombiningChar = ((displayWidth <= 0 && currentOutputExternalColumn > 0) ? 1 : 0);
+                     int outputColumn = currentOutputExternalColumn - offsetDueToCombiningChar;
+-                    setChar(outputColumn, currentOutputExternalRow, codePoint, styleAtCol);
++                    setChar(outputColumn, currentOutputExternalRow, codePoint, styleAtCol, hyperlinkAtCol);
+ 
+                     if (displayWidth > 0) {
+                         if (oldCursorRow == externalOldRow && oldCursorColumn == currentOldCol) {
+@@ -521,11 +527,21 @@ public final class TerminalBuffer {
+         return (mLines[row] == null) ? (mLines[row] = new TerminalRow(mColumns, 0)) : mLines[row];
+     }
+ 
++    public int getHyperlinkAt(int column, int externalRow) {
++        if (column < 0 || column >= mColumns || externalRow < -mActiveTranscriptRows || externalRow >= mScreenRows) return 0;
++        TerminalRow line = mLines[externalToInternalRow(externalRow)];
++        return line == null ? 0 : line.getHyperlink(column);
++    }
++
+     public void setChar(int column, int row, int codePoint, long style) {
++        setChar(column, row, codePoint, style, 0);
++    }
++
++    public void setChar(int column, int row, int codePoint, long style, int hyperlink) {
+         if (row  < 0 || row >= mScreenRows || column < 0 || column >= mColumns)
+             throw new IllegalArgumentException("TerminalBuffer.setChar(): row=" + row + ", column=" + column + ", mScreenRows=" + mScreenRows + ", mColumns=" + mColumns);
+         row = externalToInternalRow(row);
+-        allocateFullLineIfNecessary(row).setChar(column, codePoint, style);
++        allocateFullLineIfNecessary(row).setChar(column, codePoint, style, hyperlink);
+     }
+ 
+     public long getStyleAt(int externalRow, int column) {
+diff --git a/third-party/termux/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java b/third-party/termux/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java
+index 5e943ab..a50f753 100644
+--- a/third-party/termux/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java
++++ b/third-party/termux/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java
+@@ -429,6 +429,8 @@ public final class TerminalEmulator {
+ 
+     /** The cached value for this emulator for `TerminalView.mTopRow` as sessions/emulators may be switched.*/
+     private int mTopRow;
++    private final TerminalHyperlinks mHyperlinks = new TerminalHyperlinks();
++    private int mCurrentHyperlink;
+ 
+     /** If automatic scrolling of terminal is disabled */
+     private boolean mAutoScrollDisabled;
+@@ -2777,6 +2779,10 @@ public final class TerminalEmulator {
+             case 2: // Change window title to T.
+                 setTitle(textParameter);
+                 break;
++            case 8: // OSC 8 ; params ; URI ST. The id parameter is only needed for hover grouping.
++                int separator = textParameter.indexOf(';');
++                mCurrentHyperlink = separator < 0 ? 0 : mHyperlinks.add(textParameter.substring(separator + 1));
++                break;
+             case 4:
+                 // P s = 4 ; c ; spec → Change Color Number c to the color specified by spec. This can be a name or RGB
+                 // specification as per XParseColor. Any number of c name pairs may be given. The color numbers correspond
+@@ -3425,7 +3431,7 @@ public final class TerminalEmulator {
+         // so was mCursorCol changed after the offsetDueToCombiningChar conditional by another thread?
+         // TODO: Check if there are thread synchronization issues with mCursorCol and mCursorRow, possibly causing others bugs too.
+         if (column < 0) column = 0;
+-        mScreen.setChar(column, mCursorRow, codePoint, getStyle());
++        mScreen.setChar(column, mCursorRow, codePoint, getStyle(), mCurrentHyperlink);
+ 
+         if (autoWrap && displayWidth > 0)
+             mAboutToAutoWrap = (mCursorCol == mRightMargin - displayWidth);
+@@ -3483,7 +3489,13 @@ public final class TerminalEmulator {
+ 
+ 
+     /** Reset terminal state so user can interact with it regardless of present state. */
++    public String getHyperlinkAt(int column, int row) {
++        return mHyperlinks.get(mScreen.getHyperlinkAt(column, row));
++    }
++
+     public void reset() {
++        mCurrentHyperlink = 0;
++        mHyperlinks.clear();
+         setCursorStyle();
+         mArgIndex = 0;
+         mContinueSequence = false;
+diff --git a/third-party/termux/terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java b/third-party/termux/terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java
+index 14de528..0c2bde8 100644
+--- a/third-party/termux/terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java
++++ b/third-party/termux/terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java
+@@ -47,6 +47,8 @@ public final class TerminalRow {
+     boolean mLineWrap;
+     /** The style bits of each cell in the row. See {@link TextStyle}. */
+     final long[] mStyle;
++    // Allocated only for rows containing OSC 8 links. IDs resolve through a bounded emulator table.
++    private int[] mHyperlinks;
+     /** If this row might contain chars with width != 1, used for deactivating fast path */
+     boolean mHasNonOneWidthOrSurrogateChars;
+     /** If this row has a {@link TerminalBitmap}. Used for performance only. */
+@@ -67,10 +69,12 @@ public final class TerminalRow {
+         final int x2 = line.findStartOfColumn(sourceX2);
+         boolean startingFromSecondHalfOfWideChar = (sourceX1 > 0 && line.wideDisplayCharacterStartingAt(sourceX1 - 1));
+         final char[] sourceChars = (this == line) ? Arrays.copyOf(line.mText, line.mText.length) : line.mText;
++        final int[] sourceLinks = line.mHyperlinks == null ? null : (this == line ? line.mHyperlinks.clone() : line.mHyperlinks);
+         int latestNonCombiningWidth = 0;
+         for (int i = x1; i < x2; i++) {
+             char sourceChar = sourceChars[i];
+             int codePoint = Character.isHighSurrogate(sourceChar) ? Character.toCodePoint(sourceChar, sourceChars[++i]) : sourceChar;
++            boolean partialWideChar = startingFromSecondHalfOfWideChar;
+             if (startingFromSecondHalfOfWideChar) {
+                 // Just treat copying second half of wide char as copying whitespace.
+                 codePoint = ' ';
+@@ -82,7 +86,7 @@ public final class TerminalRow {
+                 sourceX1 += latestNonCombiningWidth;
+                 latestNonCombiningWidth = w;
+             }
+-            setChar(destinationX, codePoint, line.getStyle(sourceX1));
++            setChar(destinationX, codePoint, line.getStyle(sourceX1), partialWideChar || sourceLinks == null ? 0 : sourceLinks[sourceX1]);
+         }
+     }
+ 
+@@ -146,13 +150,30 @@ public final class TerminalRow {
+     public void clear(long style) {
+         Arrays.fill(mText, ' ');
+         Arrays.fill(mStyle, style);
++        mHyperlinks = null;
+         mSpaceUsed = mColumns;
+         mHasNonOneWidthOrSurrogateChars = false;
+         mHasTerminalBitmap = false;
+     }
+ 
+     // https://github.com/steven676/Android-Terminal-Emulator/commit/9a47042620bec87617f0b4f5d50568535668fe26
++    public int getHyperlink(int column) { return mHyperlinks == null ? 0 : mHyperlinks[column]; }
++
++    int lastHyperlinkColumn() {
++        if (mHyperlinks != null) for (int i = mColumns - 1; i >= 0; i--) if (mHyperlinks[i] != 0) return i;
++        return -1;
++    }
++
++    private void setHyperlink(int column, int link) {
++        if (mHyperlinks == null && link != 0) mHyperlinks = new int[mColumns];
++        if (mHyperlinks != null) mHyperlinks[column] = link;
++    }
++
+     public void setChar(int columnToSet, int codePoint, long style) {
++        setChar(columnToSet, codePoint, style, 0);
++    }
++
++    public void setChar(int columnToSet, int codePoint, long style, int hyperlink) {
+         if (columnToSet  < 0 || columnToSet >= mStyle.length)
+             throw new IllegalArgumentException("TerminalRow.setChar(): columnToSet=" + columnToSet + ", codePoint=" + codePoint + ", style=" + style);
+ 
+@@ -170,6 +191,7 @@ public final class TerminalRow {
+                 mHasNonOneWidthOrSurrogateChars = true;
+             } else {
+                 mText[columnToSet] = (char) codePoint;
++                setHyperlink(columnToSet, hyperlink);
+                 return;
+             }
+         }
+@@ -275,9 +297,16 @@ public final class TerminalRow {
+                 mSpaceUsed -= nextLen;
+             }
+         }
++        // Combining marks retain the base cell target; overwriting a wide glyph clears both cells.
++        if (!newIsCombining) {
++            setHyperlink(columnToSet, hyperlink);
++            if (newCodePointDisplayWidth == 2) setHyperlink(columnToSet + 1, hyperlink);
++            else if (oldCodePointDisplayWidth == 2) setHyperlink(columnToSet + 1, 0);
++        }
+     }
+ 
+     boolean isBlank() {
++        if (lastHyperlinkColumn() >= 0) return false;
+         for (int charIndex = 0, charLen = getSpaceUsed(); charIndex < charLen; charIndex++)
+             if (mText[charIndex] != ' ') return false;
+         return true;

@@ -1,0 +1,7 @@
+diff --git a/third-party/termux/terminal-view/src/main/java/com/termux/view/TerminalView.java b/third-party/termux/terminal-view/src/main/java/com/termux/view/TerminalView.java
+index f4f82ad..af35220 100644
+--- a/third-party/termux/terminal-view/src/main/java/com/termux/view/TerminalView.java
++++ b/third-party/termux/terminal-view/src/main/java/com/termux/view/TerminalView.java
+@@ -46 +46 @@ import com.termux.view.textselection.TextSelectionCursorController;
+-public final class TerminalView extends View {
++public class TerminalView extends View {
