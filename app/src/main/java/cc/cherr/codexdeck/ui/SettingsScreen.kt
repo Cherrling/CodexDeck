@@ -68,6 +68,17 @@ fun SettingsScreen(
             )
         }
 
+        SettingsCard("连接") {
+            SettingSwitch(
+                title = "启动时自动连接上次服务器",
+                detail = "默认关闭。开启后，App 启动会尝试恢复上次 Host 和 Thread；主动断开后仍不会自动连接。",
+                checked = settings.autoReconnectOnLaunch,
+                onCheckedChange = {
+                    controller.updateSettings(settings.copy(autoReconnectOnLaunch = it))
+                },
+            )
+        }
+
         SettingsCard("交互式 Shell") {
             Text("终端字号 ${settings.terminalFontSizeSp}sp")
             Slider(

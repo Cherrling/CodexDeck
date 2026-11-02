@@ -40,6 +40,8 @@ Researched revisions:
 | Jump Host independent username, port, auth | Implemented | Each route entry resolves its own Host fields, Identity/password, timeout, keepalive, and known-host pin. |
 | Jump cycle/missing-hop/limit validation | Implemented | Unit tests cover cycles and route construction; four jump hops maximum. |
 | Shared SSH route for Codex and Shell | Verified | The same loopback route opens an app-server exec channel and a PTY channel in one test. |
+| Multiple simultaneous Host runtimes | Implemented, device-unverified | Manual connections have independent app-server clients and per-Host Thread/model/approval/Turn snapshots; switching does not disconnect other Hosts. A two-server device lab remains pending. |
+| Explicit-connect startup behavior | Implemented | Launch starts on the Server/Hosts screen and performs no network connection unless the user opts into the default-off launch setting. |
 | Retry, timeout, keepalive | Implemented | Persisted per Host; non-idempotent app-server RPCs are never automatically replayed. |
 | SSH Agent, FIDO/passkey, hardware-backed key | Not implemented | ShellDeck at the researched revision has no SSH Agent/FIDO/passkey implementation to port. |
 | SFTP/Mosh/SOCKS proxy parity | Not implemented | Outside the stated CodexDeck acceptance scope; no simulated support is shown in UI. |
@@ -49,6 +51,7 @@ Researched revisions:
 | Capability | Status | Implementation and evidence |
 | --- | --- | --- |
 | Codex app-server JSONL over SSH stdio | Verified | Official `codex-cli 0.166.0` initialize + Thread list passed; loopback SSH test also runs an app-server-shaped fixture. |
+| Existing daemon over SSH (`app-server proxy`) | Implemented | New Host mode runs `codex app-server proxy` instead of launching a runtime; command and SSH channel coverage exist. A real managed-daemon socket E2E remains device/server-environment dependent. |
 | stdout/stderr isolation | Verified | stdout JSONL and stderr diagnostic readers are separate; non-JSON stdout is rejected as protocol data. |
 | JSON-RPC-like request IDs, timeout, concurrent requests | Implemented | Typed numeric/textual IDs preserve the wire type, 30/60 second timeouts, bounded event queue, and protocol tests. |
 | Server notifications and server-initiated requests | Implemented | Item, Turn, Thread, settings, diff, warning, error, approval, user-input, permission, and MCP elicitation handling. |
@@ -64,7 +67,8 @@ Researched revisions:
 | --- | --- | --- |
 | Paginated Thread list | Verified | Official stdio and authenticated WebSocket servers returned Thread pages. |
 | Local/remote search and archived Threads | Implemented | Debounced `thread/list` search, archived toggle, and local visible-list filtering. |
-| Group by remote cwd and recent sort | Implemented | Exact-cwd project grouping with tests; server sort by `updated_at`. |
+| Group by remote cwd and recent sort | Implemented | Normalized-cwd project grouping with tests; server sort by `updated_at`. |
+| Collapsible per-Server project groups | Implemented | Sessions are grouped by normalized remote `cwd`; collapse state is keyed by Host plus directory and Thread rows open directly into Chat. |
 | Create, resume, fork, rename, archive | Implemented | Current v2 methods; resume and first history page are separate calls. |
 | Older Turn history pagination | Implemented | `thread/turns/list` descending pages are merged chronologically and bounded in memory. |
 | Multiple Android Thread UI states | Implemented | Eight-view LRU with per-Thread Turn list, running state, and history cursor. |
@@ -91,8 +95,8 @@ Researched revisions:
 | Basic approvals | Verified | Protocol tests verify exact server request ID echo and command decision payload. |
 | Permission, file, user-input, MCP elicitation approvals | Partial | Payloads and response shapes are implemented; rich typed MCP form rendering and policy race testing remain incomplete. |
 | Model and Reasoning Effort | Implemented | Values and options come from server `model/list`, never a hard-coded provider/model catalog. |
-| Approval Policy / Sandbox / named Permission Profile | Implemented | Raw granular approval JSON and complete sandbox-policy objects are retained; next-Turn overrides use mutually exclusive protocol fields. |
-| Approval reviewer routing | Partial | `user` and experimental `auto_review` values synchronize; strict auto-review behavior and all typed forms still need server/device validation. |
+| Approval Policy / Sandbox / named Permission Profile | Implemented | One permission selector uses server profiles when available and legacy Sandbox only as an older-server fallback; request fields remain mutually exclusive. |
+| Approval reviewer routing | Partial | Current `user` and experimental `auto_review` choices are offered; deprecated `guardian_subagent` and `untrusted` are display-only compatibility values and never selectable. |
 | Turn steering and interrupt | Implemented | `turn/steer` uses the active Turn precondition; `turn/interrupt` uses Thread + Turn IDs. |
 | Thread fork and context compaction | Implemented | V2 methods wired to UI. |
 | Image attachments | Implemented | Up to four inline local images, 5 MiB each and 12 MiB encoded total, sent as v2 `UserInput` image data URLs. |
@@ -122,7 +126,7 @@ Researched revisions:
 | Material 3 dark-first Compose UI | Implemented | Dynamic color, dark default, high-density chat, Hosts/Identities/Sessions/Settings/Terminal screens. |
 | Bounded memory and streaming performance | Implemented | LRU views, Turn limit, field/queue/frame bounds, batched deltas, LazyColumn stable keys. |
 | Foreground connection service | Implemented, device-unverified | Data-sync service with one low-importance notification, Disconnect action, and API 35 timeout handling; no wakelock or polling. |
-| Automatic last Host/Thread restore | Implemented, device-unverified | Persisted non-secret restore marker; Android process death and notification permission behavior need device tests. |
+| Automatic last Host/Thread restore | Implemented, default off | Persisted non-secret restore marker is read only when the user enables launch auto-connect; device lifecycle behavior remains unverified. |
 | Main CI on push | Verified | GitHub run `41511422653` passed protocol/app/terminal tests, Docker OpenSSH/ProxyJump/PTY, lint, APK build/signature verification, and artifact upload. |
 | Pull Request CI | Implemented, event-unverified | The workflow declares `pull_request`; no external PR event has run yet. The same job path passed on `main`. |
 | Rolling pre-release workflow | Verified | Runs `41510727317`, `41512239111`, and `41512833496` updated the single public `rolling` Pre-release with matching Commit, Beijing time, monotonic versionCode, byte-identical APKs, SHA256, and verified signatures. |

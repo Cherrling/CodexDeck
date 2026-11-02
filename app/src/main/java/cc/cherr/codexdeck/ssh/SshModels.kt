@@ -1,5 +1,6 @@
 package cc.cherr.codexdeck.ssh
 
+import cc.cherr.codexdeck.data.AppServerTransportMode
 import cc.cherr.codexdeck.data.HostRecord
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -129,11 +130,11 @@ fun jumpRoute(target: HostRecord, find: (String) -> HostRecord?): List<HostRecor
 }
 
 fun HostRecord.usesSshTransport(): Boolean =
-    appServerTransport == "ssh" ||
-        (appServerTransport == "websocket" && webSocketViaSsh)
+    appServerTransport in AppServerTransportMode.sshModes ||
+        (appServerTransport == AppServerTransportMode.WEBSOCKET && webSocketViaSsh)
 
 fun validateHost(host: HostRecord): String? {
-    if (host.appServerTransport == "websocket") {
+    if (host.appServerTransport == AppServerTransportMode.WEBSOCKET) {
         validateWebSocketUrl(
             value = host.appServerUrl,
             allowInsecure = host.allowInsecureWebSocket,
@@ -142,7 +143,8 @@ fun validateHost(host: HostRecord): String? {
     }
     when {
         host.label.isBlank() -> "请填写服务器名称"
-        host.appServerTransport !in setOf("ssh", "websocket") -> "不支持的 Codex 连接方式"
+        host.appServerTransport !in AppServerTransportMode.supportedModes ->
+            "不支持的 Codex 连接方式"
         host.connectTimeoutMs !in 3_000..120_000 -> "连接超时必须为 3–120 秒"
         host.keepAliveSeconds != 0 && host.keepAliveSeconds !in 30..600 ->
             "Keepalive 必须为 0 或 30–600 秒"
@@ -156,7 +158,7 @@ fun validateHost(host: HostRecord): String? {
         host.port !in 1..65535 -> "SSH 端口必须在 1–65535"
         host.username.isBlank() -> "请填写用户名"
         host.authType !in setOf("key", "password") -> "不支持的认证方式"
-        host.appServerTransport == "ssh" && (
+        host.appServerTransport in AppServerTransportMode.sshModes && (
             host.codexExecutable.isBlank() || host.codexExecutable.length > 1024 ||
                 host.codexExecutable.any(Char::isISOControl)
             ) -> "Codex 可执行文件路径无效"
@@ -193,4 +195,9 @@ internal fun shellQuote(value: String): String =
 internal fun appServerCommand(executable: String): String {
     require(executable.isNotBlank() && executable.none(Char::isISOControl))
     return "exec ${shellQuote(executable)} app-server --listen stdio://"
+}
+
+internal fun appServerProxyCommand(executable: String): String {
+    require(executable.isNotBlank() && executable.none(Char::isISOControl))
+    return "exec ${shellQuote(executable)} app-server proxy"
 }

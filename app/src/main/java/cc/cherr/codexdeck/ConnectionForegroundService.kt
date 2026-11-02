@@ -34,7 +34,7 @@ class ConnectionForegroundService : Service() {
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_DISCONNECT) {
-            (application as CodexDeckApplication).runtime.disconnect()
+            (application as CodexDeckApplication).runtime.disconnectAll()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
@@ -47,7 +47,7 @@ class ConnectionForegroundService : Service() {
 
     override fun onTimeout(startId: Int, fgsType: Int) {
         super.onTimeout(startId, fgsType)
-        (application as CodexDeckApplication).runtime.disconnect()
+        (application as CodexDeckApplication).runtime.disconnectAll()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf(startId)
     }

@@ -35,11 +35,22 @@ class SharedSshConnection internal constructor(
     private val closed = AtomicBoolean()
     private val channels = java.util.concurrent.ConcurrentLinkedQueue<Closeable>()
 
-    fun openAppServer(executable: String): SshJsonLineTransport {
+    fun openAppServer(executable: String): SshJsonLineTransport =
+        openAppServerChannel(appServerCommand(executable))
+
+    /**
+     * Connects this SSH channel to the already-running local app-server control socket through
+     * `codex app-server proxy`. This process is only a byte proxy; it does not start another
+     * app-server runtime.
+     */
+    fun openExistingAppServer(executable: String): SshJsonLineTransport =
+        openAppServerChannel(appServerProxyCommand(executable))
+
+    private fun openAppServerChannel(commandText: String): SshJsonLineTransport {
         checkOpen()
         val session = target.startSession()
         return try {
-            val command = session.exec(appServerCommand(executable))
+            val command = session.exec(commandText)
             val transport = SshJsonLineTransport(command, session)
             lateinit var handle: Closeable
             handle = Closeable {

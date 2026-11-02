@@ -11,15 +11,16 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class AppStateTest {
     @Test
-    fun groupsThreadsByExactRemoteWorkingDirectory() {
+    fun groupsThreadsByNormalizedRemoteWorkingDirectory() {
         val threads = listOf(
             thread("1", "/srv/api", 10),
             thread("2", "/srv/web", 30),
-            thread("3", "/srv/api", 20),
+            thread("3", "/srv/api/", 20),
         )
 
         val projects = groupThreads(threads)
@@ -94,6 +95,57 @@ class AppStateTest {
                 put("granular", buildJsonObject {})
             }),
         )
+    }
+
+    @Test
+    fun switchingToLegacySandboxClearsNamedPermissionProfile() {
+        val state = AppState(
+            selectedPermissionProfileId = ":read-only",
+            sandbox = "workspace-write",
+        )
+
+        val updated = state.withSandboxMode("danger-full-access")
+
+        assertNull(updated.selectedPermissionProfileId)
+        assertEquals("danger-full-access", updated.sandbox)
+    }
+
+    @Test
+    fun switchingHostsPreservesEachServersWorkspaceSnapshot() {
+        val firstThread = thread("first-thread", "/srv/one", 10)
+        val secondThread = thread("second-thread", "/srv/two", 20)
+        val state = AppState(
+            hostConnections = mapOf(
+                "first" to HostConnectionState(
+                    hostId = "first",
+                    connectionPhase = ConnectionPhase.CONNECTED,
+                    threads = listOf(firstThread),
+                ),
+                "second" to HostConnectionState(
+                    hostId = "second",
+                    connectionPhase = ConnectionPhase.CONNECTED,
+                    threads = listOf(secondThread),
+                ),
+            ),
+        )
+
+        val first = state.activateHost("first").copy(
+            threads = listOf(thread("first-updated", "/srv/one", 30)),
+            selectedThreadId = "first-updated",
+        )
+        assertEquals("first-updated", first.threads.single().id)
+        val firstExpanded = first.withHostConnection("first") {
+            it.copy(expandedProjectPaths = setOf("/srv/one"))
+        }
+
+        val second = firstExpanded.activateHost("second")
+        assertEquals("second-thread", second.threads.single().id)
+        assertEquals(emptySet<String>(), second.expandedProjectPaths)
+
+        val switchedBack = second.activateHost("first")
+        assertEquals("first-updated", switchedBack.threads.single().id)
+        assertEquals("first", switchedBack.activeHostId)
+        assertEquals(setOf("/srv/one"), switchedBack.expandedProjectPaths)
     }
 
     private fun thread(id: String, cwd: String, updatedAt: Long) = CodexThread(

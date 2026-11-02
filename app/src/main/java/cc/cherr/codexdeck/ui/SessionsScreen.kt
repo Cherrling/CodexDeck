@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -53,7 +54,10 @@ fun SessionsScreen(
     onOpenHosts: () -> Unit,
 ) {
     val projects = remember(state.visibleThreads) { groupThreads(state.visibleThreads) }
-    var collapsed by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val switchableHosts = state.hosts.filter { host ->
+        host.id == state.activeHostId ||
+            state.connectionState(host.id).connectionPhase != ConnectionPhase.DISCONNECTED
+    }
     Column(Modifier.fillMaxSize()) {
         SectionHeading(
             title = "Codex 会话",
@@ -61,17 +65,60 @@ fun SessionsScreen(
                 "${it.label} · ${state.threads.count { thread -> thread.status.isActive }} 个运行中"
             } ?: "连接服务器后读取远端 Thread 列表",
             trailing = {
-                if (state.connectionPhase == ConnectionPhase.CONNECTED &&
-                    !state.showArchivedThreads
-                ) {
-                    IconButton(onClick = {
-                        onNewThread(projects.firstOrNull()?.path.orEmpty())
-                    }) {
-                        Icon(Icons.Default.Add, contentDescription = "新建会话")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onOpenHosts) { Text("服务器") }
+                    if (state.connectionPhase == ConnectionPhase.CONNECTED &&
+                        !state.showArchivedThreads
+                    ) {
+                        IconButton(onClick = {
+                            onNewThread(projects.firstOrNull()?.path.orEmpty())
+                        }) {
+                            Icon(Icons.Default.Add, contentDescription = "新建会话")
+                        }
                     }
                 }
             },
         )
+        if (switchableHosts.isNotEmpty()) {
+            LazyRow(
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(switchableHosts, key = { "host:${it.id}" }) { host ->
+                    val connection = state.connectionState(host.id)
+                    FilterChip(
+                        selected = state.activeHostId == host.id,
+                        onClick = { controller.selectHost(host.id) },
+                        leadingIcon = {
+                            Text(
+                                "●",
+                                color = when (connection.connectionPhase) {
+                                    ConnectionPhase.CONNECTED -> Color(0xFF66D49A)
+                                    ConnectionPhase.CONNECTING,
+                                    ConnectionPhase.RECONNECTING -> Color(0xFFFFC857)
+                                    ConnectionPhase.ERROR -> MaterialTheme.colorScheme.error
+                                    ConnectionPhase.DISCONNECTED ->
+                                        MaterialTheme.colorScheme.outline
+                                },
+                            )
+                        },
+                        label = {
+                            Text(
+                                buildString {
+                                    append(host.label)
+                                    if (connection.isTurnRunning) append(" · 运行中")
+                                    if (connection.approvals.isNotEmpty()) {
+                                        append(" · ${connection.approvals.size} 待审批")
+                                    }
+                                },
+                                maxLines = 1,
+                            )
+                        },
+                    )
+                }
+            }
+        }
         if (state.activeHostId != null) {
             ConnectionBanner(state, controller::reconnect, controller::disconnect)
         }
@@ -163,16 +210,12 @@ fun SessionsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             items(projects, key = ThreadProject::path) { project ->
+                val expanded = state.threadSearch.isNotBlank() ||
+                    project.path in state.expandedProjectPaths
                 ProjectCard(
                     project = project,
-                    collapsed = project.path in collapsed,
-                    onToggle = {
-                        collapsed = if (project.path in collapsed) {
-                            collapsed - project.path
-                        } else {
-                            collapsed + project.path
-                        }
-                    },
+                    expanded = expanded,
+                    onToggle = { controller.toggleProjectExpanded(project.path) },
                     onNewThread = { onNewThread(project.path) },
                     onOpenThread = { controller.openThread(it.id) },
                 )
@@ -200,7 +243,7 @@ fun SessionsScreen(
 @Composable
 private fun ProjectCard(
     project: ThreadProject,
-    collapsed: Boolean,
+    expanded: Boolean,
     onToggle: () -> Unit,
     onNewThread: () -> Unit,
     onOpenThread: (CodexThread) -> Unit,
@@ -217,6 +260,11 @@ private fun ProjectCard(
                     .padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                Text(
+                    if (expanded) "▾" else "▸",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Column(Modifier.weight(1f)) {
                     Text(project.name, style = MaterialTheme.typography.titleMedium)
                     Text(
@@ -232,7 +280,7 @@ private fun ProjectCard(
                     Icon(Icons.Default.Add, contentDescription = "在 ${project.name} 新建会话")
                 }
             }
-            if (!collapsed) {
+            if (expanded) {
                 project.threads.forEach { thread ->
                     ThreadRow(thread, onClick = { onOpenThread(thread) })
                 }

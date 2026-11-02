@@ -12,7 +12,7 @@ data class HostDraft(
     val identityId: String? = null,
     val jumpHostId: String? = null,
     val codexExecutable: String = "codex",
-    val appServerTransport: String = "ssh",
+    val appServerTransport: String = AppServerTransportMode.SSH_EXISTING,
     val appServerUrl: String = "",
     val webSocketViaSsh: Boolean = false,
     val allowInsecureWebSocket: Boolean = false,

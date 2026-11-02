@@ -26,6 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cc.cherr.codexdeck.AppController
+import cc.cherr.codexdeck.ConnectionPhase
 import cc.cherr.codexdeck.approvalKey
 import cc.cherr.codexdeck.data.HostRecord
 import cc.cherr.codexdeck.groupThreads
@@ -121,7 +122,13 @@ fun CodexDeckApp(controller: AppController) {
                             },
                             onDelete = { deletingHost = it },
                             onConnect = { host ->
-                                controller.connect(host.id)
+                                if (state.connectionState(host.id).connectionPhase ==
+                                    ConnectionPhase.CONNECTED
+                                ) {
+                                    controller.selectHost(host.id)
+                                } else {
+                                    controller.connect(host.id)
+                                }
                                 section = MainSection.SESSIONS
                             },
                             onOpenTerminal = controller::openTerminal,
@@ -172,6 +179,7 @@ fun CodexDeckApp(controller: AppController) {
     }
     if (showImportIdentity) {
         ImportIdentityDialog(
+            busy = state.busy,
             onDismiss = { showImportIdentity = false },
             onImport = { label, pem, passphrase ->
                 controller.importIdentity(label, pem, passphrase) { done ->

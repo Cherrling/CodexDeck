@@ -26,6 +26,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -113,15 +114,17 @@ fun TerminalScreen(
             TerminalKeyBar(terminal)
         },
     ) { insets ->
-        AndroidView(
-            factory = { terminal.controller.createView() },
-            onRelease = terminal.controller::releaseView,
-            update = { terminal.controller.setFontSize(state.settings.terminalFontSizeSp) },
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(insets)
-                .imePadding(),
-        )
+        key(terminal.id) {
+            AndroidView(
+                factory = { context -> terminal.controller.createView(context) },
+                onRelease = terminal.controller::releaseView,
+                update = { terminal.controller.setFontSize(state.settings.terminalFontSizeSp) },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(insets)
+                    .imePadding(),
+            )
+        }
     }
 }
 

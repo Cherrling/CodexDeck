@@ -26,14 +26,19 @@ published `SHA256SUMS`.
   viewing/copying/file export, and Keystore-encrypted storage.
 - SSH Host Key verification with explicit first-use trust and mismatch rejection.
 - Multi-hop ProxyJump using SSH `direct-tcpip`, independent authentication per hop.
-- Codex app-server over SSH stdio or direct WebSocket/WSS.
+- Existing Codex daemon reuse over SSH, isolated SSH stdio, or direct WebSocket/WSS.
 - Optional SSH local-port forwarding to a remote loopback WebSocket app-server.
 - Paginated Thread list, remote title/cwd/preview search, archived Threads, resume,
   create, rename, fork, archive/unarchive, compaction, and history pagination.
+- Multiple manually connected Hosts with independent app-server clients, Thread
+  catalogs, approvals, and running-Turn state; switch Hosts without disconnecting others.
+- Collapsible project groups derived from each Server's remote `cwd`, with per-Server
+  collapse state and one-tap Thread opening.
 - Streaming Agent/Reasoning/Plan/command events, Markdown/code fences, command output,
   file changes/aggregate Turn diffs, tool calls, collaboration/Subagent state, and
   approvals that disappear when another connected client resolves them.
-- Model, Reasoning Effort, Approval Policy, Sandbox, Permission Profile, Plan mode,
+- Model, Reasoning Effort, Approval Policy, one effective permission selector
+  (Permission Profile with legacy Sandbox fallback), Plan mode,
   turn steering, interruption, image attachments, and inline working-tree Review.
 - Read-only Skills, MCP server, and Plugin capability inventory with per-capability
   degradation when a server method is unavailable.
@@ -56,9 +61,41 @@ Thread listing were exercised with `codex-cli 0.166.0`.
 
 ## Configure Codex transport
 
-### SSH stdio
+### SSH to an existing app-server (preferred)
 
-Select `SSH stdio` in the Host editor. CodexDeck executes only:
+Current Codex exposes `codex app-server proxy`, which forwards stdio bytes to the
+already-running local app-server control socket. CodexDeck uses this mode by default for
+new SSH Hosts:
+
+```text
+exec '<codex executable>' app-server proxy
+```
+
+This does not start another runtime. The phone and a PC TUI can attach to the same
+in-memory Threads, active Turns, and subscriptions when both processes resolve the same
+`CODEX_HOME` and the daemon is running.
+
+Start or inspect the daemon on the Linux server:
+
+```sh
+codex app-server daemon start
+codex app-server daemon version
+```
+
+For a daemon managed independently of an interactive TUI, install its durable service
+once with `codex app-server daemon bootstrap`. The normal Codex TUI already uses the
+shared local daemon unless it was launched with `--no-daemon`.
+
+In the Host editor choose `已有 App Server` and configure the normal remote Codex
+executable path. SSH non-interactive commands must resolve the same Codex home as the
+daemon; set the deployment environment consistently if `CODEX_HOME` is customized.
+If the control socket is unavailable, start the daemon or choose one of the other
+transport modes below.
+
+### SSH-start an isolated app-server
+
+Select `启动 stdio` in the Host editor when an isolated per-connection runtime is
+intentional. CodexDeck executes only:
 
 ```sh
 exec '<codex executable>' app-server --listen stdio://
@@ -74,6 +111,9 @@ ssh user@example.com 'command -v codex'
 
 The codex executable may be configured per Host, for example
 `/opt/codex/bin/codex`.
+
+An isolated stdio server and a managed daemon do not share active in-memory Turns. Use
+this mode only when that separation is desired.
 
 ### Direct WebSocket
 
@@ -102,7 +142,7 @@ Then configure the Host with:
 - Explicitly enable cleartext `ws://` for a non-loopback listener.
 
 Direct WebSocket Hosts do not require unused SSH usernames, identities, or executable
-paths. Those fields are required only for SSH stdio or SSH-tunneled WebSocket mode.
+paths. Those fields are required only for SSH proxy/stdio or SSH-tunneled WebSocket mode.
 
 Public deployments should terminate TLS and use `wss://`. CodexDeck validates the
 system TLS trust chain and disables redirects so the Bearer token cannot be redirected
@@ -110,7 +150,8 @@ to a different origin. Do not expose an unauthenticated app-server to the Intern
 
 ### WebSocket through SSH
 
-This is the preferred way to reach a loopback app-server without publishing a port:
+Use this when the existing app-server was explicitly started as a loopback WebSocket
+listener rather than through Codex's managed daemon control socket:
 
 1. Keep `codex app-server --listen ws://127.0.0.1:8765` running.
 2. Configure a Host with its normal SSH settings.
@@ -132,8 +173,12 @@ Android network interruption are distinct failure modes.
 3. Choose password or key authentication.
 4. On first connection, compare and explicitly trust the displayed Host Key
    fingerprint.
-5. Select the Codex transport and connect.
-6. Open a Thread or create one with an absolute remote `cwd`.
+5. Select the Codex transport and press **连接 Codex**. Connections are opened only by
+   this explicit action by default.
+6. Open another Host the same way to keep both connected, then switch between them from
+   the server chips on the **会话** screen.
+7. Expand a project directory and tap a Thread, or create one with an absolute remote
+   `cwd`.
 
 The default debug package is `cc.cherr.codexdeck.debug`. A release-signed package uses
 `cc.cherr.codexdeck`.
@@ -176,7 +221,7 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 Real official-server checks:
 
 ```sh
-# SSH stdio handshake and Thread listing through JSONL
+# Isolated SSH stdio handshake and Thread listing through JSONL
 mkdir -p /tmp/codexdeck-codex-home
 CODEX_HOME=/tmp/codexdeck-codex-home \
 python3 scripts/check_app_server_protocol.py
@@ -188,7 +233,7 @@ CODEXDECK_WS_TEST_TOKEN=your-token \
   --tests 'cc.cherr.codexdeck.transport.WebSocketAppServerSmokeTest'
 
 # Real OpenSSH test: encrypted key formats, two-hop direct-tcpip,
-# SSH stdio app-server initialization, and a shared PTY. The isolated Docker
+# both SSH app-server command modes, and a shared PTY. The isolated Docker
 # sshd is used because some container/non-root hosts cannot allocate PTYs from
 # a host-side sshd.
 docker build \

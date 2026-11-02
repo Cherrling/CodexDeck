@@ -58,7 +58,8 @@ AppController ---- Room / SettingsStore / CredentialVault
     +---- AppServerClient ---- JsonLineTransport
     |                              |
     |                              +---- SshJsonLineTransport
-    |                              |       command stdin/stdout JSONL
+    |                              |       proxy -> existing local daemon
+    |                              |       or launch -> isolated stdio server
     |                              |       command stderr -> diagnostics
     |                              |
     |                              +---- WebSocketJsonLineTransport
@@ -127,7 +128,21 @@ app-server exec channel, multiple PTY shell channels, and optional local TCP for
 Closing one shell does not close the shared route; closing the route closes all owned
 channels and clients.
 
-### stdio isolation
+### Existing app-server over SSH
+
+The preferred SSH mode executes:
+
+```text
+exec '<configured path>' app-server proxy
+```
+
+`proxy` is a byte bridge over stdin/stdout to the already-running local app-server
+control socket. It does not create another Runtime. This is what allows a phone and a PC
+TUI using the same Unix user and `CODEX_HOME` to observe or control the same loaded
+Threads. The Android app still sees the normal JSONL transport and does not depend on the
+control socket implementation.
+
+### Isolated stdio launch
 
 The SSH exec command is:
 
@@ -145,6 +160,8 @@ is not interpreted as terminal content or JSON-RPC.
 
 - JSON object per newline-terminated line.
 - stdout/stderr separated at the SSH channel.
+- `SSH_EXISTING` pipes stdio to `codex app-server proxy`; `SSH_LAUNCH` starts an
+  isolated `--listen stdio://` process.
 - Background reader threads push messages into Flow/Channel boundaries.
 - The client supports numeric/string request IDs, concurrent requests, timeouts, server
   requests, notifications, and connection-close propagation.
@@ -183,6 +200,14 @@ The app deliberately distinguishes four concepts:
 4. **Android UI cache**: bounded, non-authoritative `ThreadViewState` used for fast
    switching and display.
 
+Each manually connected Host also has its own process-local runtime and
+`HostConnectionState` snapshot. A runtime owns its app-server client, Thread list,
+selected Thread, model/collaboration/permission catalogs, approvals, reconnect jobs,
+and streaming event collector. Inactive Host runtimes continue collecting events into
+their own snapshot; selecting a Host swaps that snapshot into the main Compose surface
+without closing other SSH/App Server connections. Thread and approval IDs are never
+treated as globally unique across Hosts.
+
 `thread/resume` establishes a subscription to the selected Thread. App-server can
 return history while also subscribing atomically to subsequent updates. After a
 transport loss, CodexDeck reconnects and resumes the Thread again. It never treats the
@@ -217,9 +242,11 @@ Thread's visible timeline.
 ## Lifecycle and background behavior
 
 `AppController` is process-scoped in `CodexDeckApplication`, independent of Compose
-navigation or Activity recreation. A low-importance foreground service is active only
-while a connection/retry or terminal session needs it. It has a visible notification
-and a Disconnect action. It does not acquire a wakelock and performs no polling.
+navigation or Activity recreation. It owns a runtime map keyed by Host ID, so one Host
+can reconnect or stream while another remains active. A low-importance foreground
+service is active while any Host connection/retry or terminal session needs it. It has
+a visible notification and a Disconnect action. It does not acquire a wakelock and
+performs no polling.
 Opening or closing a Shell does not rewrite the Codex connection phase; the foreground
 service is driven by live terminal sessions and the independent Codex transport state.
 On Android versions that enforce the `dataSync` foreground-service time limit, the
@@ -237,8 +264,9 @@ submit two non-idempotent `turn/start` requests. A completion callback only clea
 composer if it still belongs to the state that initiated the send.
 
 The last Host/Thread identity is remembered outside credential records. Opening the app
-after process death attempts a single visible reconnect and Thread resume. Manual
-Disconnect clears that restore marker. Android may still terminate a foreground
+does not connect by default; after process death it attempts one visible reconnect and
+Thread resume only when the user enables "auto-connect on launch". Manual Disconnect
+clears that restore marker. Android may still terminate a foreground
 data-sync service under platform policy; the server-side Agent truth is never inferred
 from the phone process.
 

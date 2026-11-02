@@ -42,6 +42,8 @@ import androidx.compose.ui.unit.dp
 import cc.cherr.codexdeck.AppController
 import cc.cherr.codexdeck.AppState
 import cc.cherr.codexdeck.ConnectionPhase
+import cc.cherr.codexdeck.HostConnectionState
+import cc.cherr.codexdeck.data.AppServerTransportMode
 import cc.cherr.codexdeck.data.HostRecord
 import cc.cherr.codexdeck.ssh.usesSshTransport
 
@@ -67,10 +69,13 @@ fun HostsScreen(
                 it.tags.contains(value, true)
         }
     }
+    val connectedCount = state.hosts.count {
+        state.connectionState(it.id).connectionPhase == ConnectionPhase.CONNECTED
+    }
     Column(Modifier.fillMaxSize()) {
         SectionHeading(
             title = "服务器",
-            subtitle = "${state.hosts.size} 台主机 · SSH 凭据由 Android Keystore 保护",
+            subtitle = "${state.hosts.size} 台主机 · $connectedCount 已连接 · SSH 凭据由 Android Keystore 保护",
         )
         if (state.activeHostId != null) {
             ConnectionBanner(state, controller::reconnect, controller::disconnect)
@@ -107,9 +112,10 @@ fun HostsScreen(
                 HostCard(
                     host = host,
                     active = state.activeHostId == host.id,
-                    phase = state.connectionPhase,
+                    connection = state.connectionState(host.id),
                     onConnect = { onConnect(host) },
                     onTerminal = { onOpenTerminal(host.id) },
+                    onDisconnect = { controller.disconnect(host.id) },
                     onFavorite = { controller.toggleFavorite(host.id) },
                     onEdit = { onEdit(host) },
                     onDuplicate = { controller.duplicateHost(host.id) },
@@ -150,9 +156,10 @@ fun ConnectionBanner(
 private fun HostCard(
     host: HostRecord,
     active: Boolean,
-    phase: ConnectionPhase,
+    connection: HostConnectionState,
     onConnect: () -> Unit,
     onTerminal: () -> Unit,
+    onDisconnect: () -> Unit,
     onFavorite: () -> Unit,
     onEdit: () -> Unit,
     onDuplicate: () -> Unit,
@@ -222,7 +229,14 @@ private fun HostCard(
                 when {
                     host.usesSshTransport() -> buildString {
                         append("Codex: ")
-                        append(if (host.appServerTransport == "ssh") host.codexExecutable else "SSH Tunnel WebSocket")
+                        append(
+                            when (host.appServerTransport) {
+                                AppServerTransportMode.SSH_EXISTING -> "已有 App Server"
+                                AppServerTransportMode.SSH_LAUNCH ->
+                                    "启动 App Server · ${host.codexExecutable}"
+                                else -> "SSH Tunnel WebSocket"
+                            },
+                        )
                         if (host.jumpHostId != null) append(" · 经跳板机")
                     }
                     else -> "Codex: Direct WebSocket"
@@ -230,12 +244,61 @@ private fun HostCard(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            val statusColor = when (connection.connectionPhase) {
+                ConnectionPhase.CONNECTED -> Color(0xFF66D49A)
+                ConnectionPhase.CONNECTING, ConnectionPhase.RECONNECTING -> Color(0xFFFFC857)
+                ConnectionPhase.ERROR -> MaterialTheme.colorScheme.error
+                ConnectionPhase.DISCONNECTED -> MaterialTheme.colorScheme.outline
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                StatusDot(
+                    color = statusColor,
+                    label = when (connection.connectionPhase) {
+                        ConnectionPhase.CONNECTED -> if (active) "当前服务器" else "已连接"
+                        ConnectionPhase.CONNECTING -> "连接中"
+                        ConnectionPhase.RECONNECTING -> "重新连接中"
+                        ConnectionPhase.ERROR -> "连接失败"
+                        ConnectionPhase.DISCONNECTED -> "未连接"
+                    },
+                )
+                if (connection.approvals.isNotEmpty()) {
+                    Text(
+                        "${connection.approvals.size} 个待审批",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+            if (connection.connectionPhase == ConnectionPhase.ERROR) {
+                Text(
+                    connection.connectionMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onConnect, modifier = Modifier.weight(1f)) {
+                val connecting = connection.connectionPhase in setOf(
+                    ConnectionPhase.CONNECTING,
+                    ConnectionPhase.RECONNECTING,
+                )
+                Button(
+                    onClick = onConnect,
+                    modifier = Modifier.weight(1f),
+                    enabled = !connecting,
+                ) {
                     Text(
                         when {
-                            active && phase == ConnectionPhase.CONNECTED -> "打开 Codex"
-                            active && phase in setOf(ConnectionPhase.CONNECTING, ConnectionPhase.RECONNECTING) -> "连接中…"
+                            active && connection.connectionPhase == ConnectionPhase.CONNECTED ->
+                                "打开 Codex"
+                            connection.connectionPhase == ConnectionPhase.CONNECTED ->
+                                "切换并打开"
+                            connecting -> "连接中…"
+                            connection.connectionPhase == ConnectionPhase.ERROR -> "重试连接"
                             else -> "连接 Codex"
                         },
                     )
@@ -245,6 +308,9 @@ private fun HostCard(
                     enabled = host.usesSshTransport(),
                 ) {
                     Text("Shell")
+                }
+                if (connection.connectionPhase != ConnectionPhase.DISCONNECTED) {
+                    TextButton(onClick = onDisconnect) { Text("断开") }
                 }
             }
         }

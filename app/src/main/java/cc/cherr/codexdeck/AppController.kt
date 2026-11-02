@@ -3,6 +3,7 @@ package cc.cherr.codexdeck
 import android.content.Context
 import androidx.room.Room
 import cc.cherr.codexdeck.data.AppSettings
+import cc.cherr.codexdeck.data.AppServerTransportMode
 import cc.cherr.codexdeck.data.CodexDeckDatabase
 import cc.cherr.codexdeck.data.CredentialVault
 import cc.cherr.codexdeck.data.HostDraft
@@ -32,6 +33,7 @@ import cc.cherr.codexdeck.ssh.SshConnectionManager
 import cc.cherr.codexdeck.ssh.SshJsonLineTransport
 import cc.cherr.codexdeck.ssh.SshLocalTunnel
 import cc.cherr.codexdeck.ssh.TrustDecision
+import cc.cherr.codexdeck.ssh.usesSshTransport
 import cc.cherr.codexdeck.terminal.ShellTerminalController
 import cc.cherr.codexdeck.transport.WebSocketJsonLineTransport
 import kotlinx.coroutines.CoroutineScope
@@ -69,6 +71,21 @@ private const val MAX_IMAGE_ATTACHMENTS = 4
 private const val MAX_IMAGE_DATA_CHARS = 12 * 1024 * 1024
 private const val TRUNCATION_MARKER = "\n\n[Earlier output truncated by CodexDeck]\n\n"
 
+private class HostRuntime(val hostId: String) {
+    val generation = AtomicInteger()
+    var client: AppServerClient? = null
+    var transport: JsonLineTransport? = null
+    var localTunnel: SshLocalTunnel? = null
+    var eventJob: Job? = null
+    var diagnosticJob: Job? = null
+    var connectJob: Job? = null
+    var reconnectJob: Job? = null
+    var threadRefreshJob: Job? = null
+    var threadSearchJob: Job? = null
+    var threadListJob: Job? = null
+    var userDisconnected = true
+}
+
 class AppController(
     context: Context,
     dao: cc.cherr.codexdeck.data.StoreDao,
@@ -82,21 +99,10 @@ class AppController(
     private val ssh = SshConnectionManager(dao, vault)
     private val prompts = ConnectionPromptGateway()
     private val controlLock = Any()
-    private val generation = AtomicInteger()
     private val _state = MutableStateFlow(AppState(settings = settingsStore.read()))
     val state: StateFlow<AppState> = _state.asStateFlow()
 
-    private var appServer: AppServerClient? = null
-    private var appServerTransport: JsonLineTransport? = null
-    private var localTunnel: SshLocalTunnel? = null
-    private var eventJob: Job? = null
-    private var diagnosticJob: Job? = null
-    private var connectJob: Job? = null
-    private var reconnectJob: Job? = null
-    private var threadRefreshJob: Job? = null
-    private var threadSearchJob: Job? = null
-    private var threadListJob: Job? = null
-    private var userDisconnected = true
+    private val runtimes = mutableMapOf<String, HostRuntime>()
     private var restoreAttempted = false
 
     init {
@@ -108,56 +114,74 @@ class AppController(
         refreshLocal()
     }
 
+    private fun runtimeFor(hostId: String): HostRuntime =
+        runtimes.getOrPut(hostId) { HostRuntime(hostId) }
+
+    private fun activeRuntime(): HostRuntime? =
+        state.value.activeHostId?.let(::runtimeFor)
+
+    private fun activeClient(): AppServerClient? = activeRuntime()?.client
+
+    fun selectHost(hostId: String) {
+        if (state.value.hosts.none { it.id == hostId }) return
+        _state.update { current ->
+            val updated = current.activateHost(hostId)
+            val threadId = updated.selectedThreadId
+            settingsStore.rememberConnection(hostId, threadId)
+            updated
+        }
+    }
+
     fun connect(hostId: String) {
-        if (connectJob?.isActive == true || reconnectJob?.isActive == true) return
-        userDisconnected = false
-        settingsStore.rememberConnection(hostId, threadId = null)
-        reconnectJob?.cancel()
-        connectJob = scope.launch {
+        val runtime = runtimeFor(hostId)
+        if (runtime.connectJob?.isActive == true || runtime.reconnectJob?.isActive == true) return
+        runtime.userDisconnected = false
+        runtime.reconnectJob?.cancel()
+        selectHost(hostId)
+        runtime.connectJob = scope.launch {
             connectInternal(hostId = hostId, reconnect = false, reopenThreadId = null)
         }
     }
 
-    fun disconnect() {
-        userDisconnected = true
-        settingsStore.clearConnection()
-        reconnectJob?.cancel()
-        connectJob?.cancel()
-        closeCodexConnection()
-        val terminals = _state.value.terminalSessions
-        val sshConnections = ssh.detachAllConnections()
+    fun disconnect(hostId: String? = state.value.activeHostId) {
+        val targetHostId = hostId ?: return
+        val runtime = runtimeFor(targetHostId)
+        runtime.userDisconnected = true
+        val wasConnecting = runtime.connectJob?.isActive == true
+        runtime.reconnectJob?.cancel()
+        runtime.connectJob?.cancel()
+        closeHostConnection(targetHostId)
+        if (settingsStore.lastHostId() == targetHostId) settingsStore.clearConnection()
+        val terminals = _state.value.terminalSessions.filter { it.hostId == targetHostId }
+        val remainingTerminals = _state.value.terminalSessions.filterNot { it.hostId == targetHostId }
+        val selectedTerminal = _state.value.selectedTerminalId
+            ?.takeIf { id -> remainingTerminals.any { it.id == id } }
         cleanupScope.launch {
             terminals.forEach { runCatching { it.controller.close() } }
-            sshConnections.forEach { runCatching { it.close() } }
+            runCatching { ssh.close(targetHostId) }
         }
-        prompts.cancelAll()
-        ConnectionForegroundService.stop(appContext)
+        if (wasConnecting) prompts.cancelAll()
         _state.update {
-            it.copy(
-                connectionPhase = ConnectionPhase.DISCONNECTED,
-                connectionMessage = "已断开",
-                activeHostId = null,
-                selectedThreadId = null,
-                selectedSession = null,
-                turns = emptyList(),
-                threadViews = emptyMap(),
-                threadNextCursor = null,
-                isLoadingThreads = false,
-                activeTurnId = null,
-                isTurnRunning = false,
+            it.withHostConnection(targetHostId) { connection ->
+                HostConnectionState(
+                    hostId = connection.hostId,
+                    connectionPhase = ConnectionPhase.DISCONNECTED,
+                    connectionMessage = "已断开",
+                )
+            }.copy(
                 pendingPrompt = null,
-                approvals = emptyList(),
-                respondingApprovalIds = emptySet(),
-                terminalSessions = emptyList(),
-                selectedTerminalId = null,
+                terminalSessions = remainingTerminals,
+                selectedTerminalId = selectedTerminal,
                 busy = false,
                 isSending = false,
-                isLoadingThread = false,
-                isLoadingHistory = false,
-                isLoadingCapabilities = false,
-                capabilities = null,
             )
         }
+        syncForegroundService()
+    }
+
+    fun disconnectAll() {
+        runtimes.keys.toList().forEach(::disconnect)
+        ConnectionForegroundService.stop(appContext)
     }
 
     fun reconnect() {
@@ -166,16 +190,17 @@ class AppController(
 
     fun restoreLastConnection() {
         if (restoreAttempted) return
+        if (!_state.value.settings.autoReconnectOnLaunch) return
         restoreAttempted = true
         val hostId = settingsStore.lastHostId() ?: return
         val threadId = settingsStore.lastThreadId()
         scope.launch {
-            if (state.value.activeHostId != null || connectJob?.isActive == true) return@launch
+            if (runtimes.values.any { it.client != null || it.connectJob?.isActive == true }) return@launch
             if (local.host(hostId) == null) {
                 settingsStore.clearConnection()
                 return@launch
             }
-            userDisconnected = false
+            runtimeFor(hostId).userDisconnected = false
             connectInternal(hostId, reconnect = true, reopenThreadId = threadId)
         }
     }
@@ -189,7 +214,7 @@ class AppController(
                 val id = UUID.randomUUID().toString()
                 var controller: ShellTerminalController? = null
                 controller = ShellTerminalController(
-                    context = appContext,
+                    appContext = appContext,
                     transport = connection.newShellTransport(),
                     initialFontSizeSp = state.value.settings.terminalFontSizeSp,
                     onFinished = {
@@ -202,7 +227,6 @@ class AppController(
                     hostLabel = host.label,
                     controller = controller,
                 )
-                userDisconnected = false
                 _state.update {
                     it.copy(
                         terminalSessions = it.terminalSessions + handle,
@@ -246,66 +270,85 @@ class AppController(
         reconnect: Boolean,
         reopenThreadId: String?,
     ) {
+        val runtime = runtimeFor(hostId)
         val host = local.host(hostId) ?: run {
             showError("服务器不存在")
             return
         }
-        closeCodexConnection()
-        val generationAtStart = generation.incrementAndGet()
+        closeHostConnection(hostId)
+        val generationAtStart = runtime.generation.incrementAndGet()
         val transportLabel = when {
-            host.appServerTransport == "websocket" && host.webSocketViaSsh ->
+            host.appServerTransport == AppServerTransportMode.WEBSOCKET && host.webSocketViaSsh ->
                 "SSH Tunnel WebSocket"
-            host.appServerTransport == "websocket" -> "WebSocket"
-            else -> "SSH stdio"
+            host.appServerTransport == AppServerTransportMode.WEBSOCKET -> "WebSocket"
+            host.appServerTransport == AppServerTransportMode.SSH_EXISTING -> "SSH 已有 App Server"
+            else -> "SSH 启动 App Server"
         }
-        _state.update {
-            it.copy(
+        _state.update { current ->
+            val shownHost = if (!reconnect ||
+                current.activeHostId == null ||
+                current.activeHostId == hostId
+            ) {
+                current.activateHost(hostId)
+            } else {
+                current
+            }
+            shownHost.withHostConnection(hostId) {
+                it.copy(
                 connectionPhase = if (reconnect) ConnectionPhase.RECONNECTING else ConnectionPhase.CONNECTING,
                 connectionMessage = if (reconnect) {
                     "网络已恢复，正在通过 $transportLabel 重新同步 ${host.label}…"
                 } else {
                     "正在通过 $transportLabel 连接 ${host.label}…"
                 },
-                activeHostId = hostId,
                 error = null,
+                notice = null,
+                )
+            }.copy(
                 pendingPrompt = null,
             )
         }
         syncForegroundService()
         try {
-            val needsSsh = host.appServerTransport == "ssh" || host.webSocketViaSsh
+            val needsSsh = host.usesSshTransport()
             val sshConnection = if (needsSsh) ssh.connect(hostId, prompts) else null
-            if (generationAtStart != generation.get()) return
-            val transport: JsonLineTransport = if (host.appServerTransport == "ssh") {
-                withContext(Dispatchers.IO) {
+            if (generationAtStart != runtime.generation.get()) return
+            val transport: JsonLineTransport = when (host.appServerTransport) {
+                AppServerTransportMode.SSH_LAUNCH -> withContext(Dispatchers.IO) {
                     requireNotNull(sshConnection).openAppServer(host.codexExecutable)
                 }
-            } else {
-                var effectiveUrl = host.appServerUrl
-                if (host.webSocketViaSsh) {
-                    val uri = URI(host.appServerUrl)
-                    val port = if (uri.port >= 0) uri.port else 80
-                    val tunnel = withContext(Dispatchers.IO) {
-                        requireNotNull(sshConnection)
-                            .openLocalTunnel(requireNotNull(uri.host), port)
-                    }
-                    localTunnel = tunnel
-                    effectiveUrl = tunneledWebSocketUrl(host.appServerUrl, tunnel.localPort)
+                AppServerTransportMode.SSH_EXISTING -> withContext(Dispatchers.IO) {
+                    requireNotNull(sshConnection).openExistingAppServer(host.codexExecutable)
                 }
-                val token = local.appServerToken(host)
-                WebSocketJsonLineTransport.connect(
-                    url = effectiveUrl,
-                    bearerToken = token,
-                    connectTimeout = host.connectTimeoutMs.milliseconds,
-                    allowInsecure = host.allowInsecureWebSocket,
-                )
+                else -> {
+                    var effectiveUrl = host.appServerUrl
+                    if (host.webSocketViaSsh) {
+                        val uri = URI(host.appServerUrl)
+                        val port = if (uri.port >= 0) uri.port else 80
+                        val tunnel = withContext(Dispatchers.IO) {
+                            requireNotNull(sshConnection)
+                                .openLocalTunnel(requireNotNull(uri.host), port)
+                        }
+                        runtime.localTunnel = tunnel
+                        effectiveUrl = tunneledWebSocketUrl(host.appServerUrl, tunnel.localPort)
+                    }
+                    val token = local.appServerToken(host)
+                    WebSocketJsonLineTransport.connect(
+                        url = effectiveUrl,
+                        bearerToken = token,
+                        connectTimeout = host.connectTimeoutMs.milliseconds,
+                        allowInsecure = host.allowInsecureWebSocket,
+                    )
+                }
             }
-            appServerTransport = transport
+            runtime.transport = transport
             if (transport is SshJsonLineTransport) {
-                diagnosticJob = scope.launch {
+                runtime.diagnosticJob = scope.launch {
                     transport.diagnostics.collect { line ->
-                        if (generationAtStart == generation.get()) {
-                            _state.update { it.copy(lastDiagnostic = line.take(2_000)) }
+                        if (generationAtStart == runtime.generation.get()) {
+                            updateHostConnection(hostId) {
+                                it.copy(lastDiagnostic = line.take(2_000))
+                            }
                         }
                     }
                 }
@@ -316,8 +359,8 @@ class AppController(
                     version = BuildConfig.VERSION_NAME,
                 ),
             )
-            appServer = client
-            eventJob = scope.launch {
+            runtime.client = client
+            runtime.eventJob = scope.launch {
                 val pendingDeltas = linkedMapOf<DeltaKey, StringBuilder>()
                 var flushJob: Job? = null
 
@@ -325,7 +368,7 @@ class AppController(
                     if (pendingDeltas.isEmpty()) return
                     val batch = pendingDeltas.mapValues { it.value.toString() }
                     pendingDeltas.clear()
-                    _state.update { current -> applyDeltas(current, batch) }
+                    updateHostConnection(hostId) { current -> current.applyDeltas(batch) }
                 }
 
                 fun scheduleDeltaFlush() {
@@ -338,7 +381,7 @@ class AppController(
                 }
 
                 client.events.collect { event ->
-                    if (client !== appServer) return@collect
+                    if (client !== runtime.client) return@collect
                     val delta = event.deltaKey()
                     if (delta != null) {
                         pendingDeltas.getOrPut(delta) { StringBuilder() }.append(event.deltaText())
@@ -349,13 +392,13 @@ class AppController(
                         flushJob?.cancel()
                         flushJob = null
                         flushDeltas()
-                        handleEvent(event)
+                        handleEvent(hostId, event)
                     }
                 }
                 flushDeltas()
             }
             client.initialize()
-            if (generationAtStart != generation.get()) return
+            if (generationAtStart != runtime.generation.get()) return
 
             val threadPage = client.listThreadsPage(limit = 60)
             val threads = threadPage.threads
@@ -366,7 +409,7 @@ class AppController(
             local.markUsed(hostId)
             val selectedModel = models.firstOrNull { it.isDefault } ?: models.firstOrNull()
             val projects = groupThreads(threads)
-            _state.update {
+            updateHostConnection(hostId) {
                 it.copy(
                     connectionPhase = ConnectionPhase.CONNECTED,
                     connectionMessage = buildString {
@@ -387,38 +430,61 @@ class AppController(
                         modes.any { mode -> mode.mode == requested }
                     } ?: modes.firstOrNull { mode -> mode.mode == "default" }?.mode ?: "default",
                     permissionProfiles = profiles,
-                    pendingPrompt = null,
                     error = null,
+                    notice = null,
                 )
+            }
+            if (state.value.activeHostId == hostId) {
+                _state.update { it.copy(pendingPrompt = null) }
             }
             refreshHosts()
             syncForegroundService()
-            if (reopenThreadId != null) openThread(reopenThreadId)
+            if (reopenThreadId != null && state.value.activeHostId == hostId) {
+                openThread(reopenThreadId)
+            }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (failure: Throwable) {
-            if (generationAtStart != generation.get()) return
-            closeCodexConnection()
+            if (generationAtStart != runtime.generation.get()) return
+            closeHostConnection(hostId)
             val message = friendlyError(failure)
-            _state.update {
+            updateHostConnection(hostId) {
                 it.copy(
                     connectionPhase = ConnectionPhase.ERROR,
                     connectionMessage = message,
                     error = message,
-                    pendingPrompt = null,
                 )
             }
+            if (state.value.activeHostId == hostId) {
+                _state.update { it.copy(pendingPrompt = null) }
+            }
             syncForegroundService()
-            if (!reconnect && !userDisconnected && isReconnectable(failure)) {
+            if (!reconnect && !runtime.userDisconnected && isReconnectable(failure)) {
                 scheduleReconnect(hostId)
             }
         }
     }
 
-    private fun handleEvent(event: CodexEvent) {
+    private fun updateHostConnection(
+        hostId: String,
+        transform: (HostConnectionState) -> HostConnectionState,
+    ) {
+        _state.update { current -> current.withHostConnection(hostId, transform) }
+    }
+
+    private fun showHostError(hostId: String, message: String) {
+        updateHostConnection(hostId) {
+            it.copy(error = message, isSending = false)
+        }
+        if (state.value.activeHostId == hostId) {
+            _state.update { it.copy(error = message, busy = false) }
+        }
+    }
+
+    private fun handleEvent(hostId: String, event: CodexEvent) {
         when (event) {
-            is CodexEvent.ItemUpsert -> _state.update { state ->
-                state.withThreadView(event.threadId) { view ->
+            is CodexEvent.ItemUpsert -> updateHostConnection(hostId) { connection ->
+                connection.withThreadView(event.threadId) { view ->
                     view.copy(
                         turns = trimTurns(
                             upsertItem(
@@ -432,8 +498,8 @@ class AppController(
                     )
                 }
             }
-            is CodexEvent.TurnChanged -> _state.update {
-                it.withThreadView(event.threadId) { view ->
+            is CodexEvent.TurnChanged -> updateHostConnection(hostId) { connection ->
+                connection.withThreadView(event.threadId) { view ->
                     view.copy(
                         turns = updateTurnStatus(view.turns, event.turnId, event.status),
                         activeTurnId = if (event.running) event.turnId ?: view.activeTurnId else null,
@@ -444,10 +510,10 @@ class AppController(
                     if (event.error != null) updated.copy(error = event.error) else updated
                 }
             }.also { syncForegroundService() }
-            is CodexEvent.ThreadChanged -> scheduleThreadRefresh()
+            is CodexEvent.ThreadChanged -> scheduleThreadRefresh(hostId)
             is CodexEvent.ThreadSettingsChanged -> {
                 val threadId = event.threadId ?: return
-                _state.update { current ->
+                updateHostConnection(hostId) { current ->
                     val updated = current.withThreadView(threadId) { view ->
                         view.copy(
                             session = view.session?.withSettings(event.settings),
@@ -461,7 +527,7 @@ class AppController(
                     }
                 }
             }
-            is CodexEvent.TurnDiffChanged -> _state.update { current ->
+            is CodexEvent.TurnDiffChanged -> updateHostConnection(hostId) { current ->
                 current.withThreadView(event.threadId) { view ->
                     view.copy(
                         turns = updateTurnDiff(view.turns, event.turnId, event.diff),
@@ -469,7 +535,7 @@ class AppController(
                     )
                 }
             }
-            is CodexEvent.ApprovalRequested -> _state.update { current ->
+            is CodexEvent.ApprovalRequested -> updateHostConnection(hostId) { current ->
                 val key = event.request.approvalKey()
                 current.copy(
                     approvals = current.approvals.filterNot {
@@ -477,7 +543,7 @@ class AppController(
                     } + event.request,
                 )
             }
-            is CodexEvent.ApprovalResolved -> _state.update { current ->
+            is CodexEvent.ApprovalResolved -> updateHostConnection(hostId) { current ->
                 val key = event.requestId.approvalKey()
                 current.copy(
                     approvals = current.approvals.filterNot {
@@ -488,20 +554,25 @@ class AppController(
                     }.toSet(),
                 )
             }
-            is CodexEvent.Warning -> _state.update { it.copy(notice = event.message) }
-            is CodexEvent.ServerError -> _state.update { current ->
+            is CodexEvent.Warning -> updateHostConnection(hostId) {
+                it.copy(notice = event.message)
+            }
+            is CodexEvent.ServerError -> updateHostConnection(hostId) { current ->
                 if (event.willRetry) {
                     current.copy(notice = "Codex 暂时错误，服务器正在重试：${event.message}")
                 } else {
                     current.copy(error = event.message)
                 }
             }
-            is CodexEvent.Diagnostic -> _state.update {
+            is CodexEvent.Diagnostic -> updateHostConnection(hostId) {
                 it.copy(lastDiagnostic = event.message.take(2_000))
             }
             is CodexEvent.Disconnected -> {
-                if (!userDisconnected && state.value.connectionPhase != ConnectionPhase.DISCONNECTED) {
-                    scheduleReconnect(state.value.activeHostId)
+                val runtime = runtimeFor(hostId)
+                if (!runtime.userDisconnected &&
+                    state.value.connectionState(hostId).connectionPhase != ConnectionPhase.DISCONNECTED
+                ) {
+                    scheduleReconnect(hostId)
                 }
             }
             is CodexEvent.Initialized -> Unit
@@ -515,6 +586,24 @@ class AppController(
 
     private fun applyDeltas(state: AppState, batch: Map<DeltaKey, String>): AppState {
         var updated = state
+        for ((key, delta) in batch) {
+            if (key.itemId.isBlank() || delta.isEmpty()) {
+                continue
+            }
+            updated = updated.withThreadView(key.threadId) { view ->
+                view.copy(
+                    turns = trimTurns(
+                        appendDelta(view.turns, view.activeTurnId, key.itemId, key.field, delta),
+                    ),
+                    lastUsedAt = System.currentTimeMillis(),
+                )
+            }
+        }
+        return updated
+    }
+
+    private fun HostConnectionState.applyDeltas(batch: Map<DeltaKey, String>): HostConnectionState {
+        var updated = this
         for ((key, delta) in batch) {
             if (key.itemId.isBlank() || delta.isEmpty()) {
                 continue
@@ -569,10 +658,11 @@ class AppController(
     }
 
     fun openThread(threadId: String) {
-        val client = appServer ?: return showError("请先连接服务器")
+        val hostId = state.value.activeHostId ?: return showError("请先连接服务器")
+        val client = activeClient() ?: return showError("请先连接服务器")
         if (state.value.isLoadingThread && state.value.selectedThreadId == threadId) return
         scope.launch {
-            _state.update { current ->
+            updateHostConnection(hostId) { current ->
                 val now = System.currentTimeMillis()
                 val previous = current.activeThreadView()?.copy(lastUsedAt = now)
                 val views = trimThreadViews(
@@ -599,7 +689,7 @@ class AppController(
                 )
                 val page = client.listTurns(threadId, limit = 20, sortDirection = "desc")
                 val chronological = page.turns.asReversed()
-                _state.update { current ->
+                updateHostConnection(hostId) { current ->
                     val existing = current.threadViews[threadId]
                     val turns = mergeTurns(
                         existing?.turns.orEmpty(),
@@ -632,11 +722,11 @@ class AppController(
                     ).withSelectedSession(session)
                 }
                 syncForegroundService()
-                state.value.activeHostId?.let {
-                    settingsStore.rememberConnection(it, threadId)
+                if (state.value.activeHostId == hostId) {
+                    settingsStore.rememberConnection(hostId, threadId)
                 }
             } catch (failure: Throwable) {
-                _state.update {
+                updateHostConnection(hostId) {
                     if (it.selectedThreadId == threadId) {
                         it.copy(isLoadingThread = false, error = friendlyError(failure))
                     } else {
@@ -674,16 +764,17 @@ class AppController(
     }
 
     fun loadOlderHistory() {
-        val client = appServer ?: return
-        val stateBefore = state.value
+        val hostId = state.value.activeHostId ?: return
+        val client = activeClient() ?: return
+        val stateBefore = state.value.connectionState(hostId)
         val threadId = stateBefore.selectedThreadId ?: return
         val cursor = stateBefore.olderHistoryCursor ?: return
         if (stateBefore.isLoadingHistory) return
         scope.launch {
-            _state.update { it.copy(isLoadingHistory = true) }
+            updateHostConnection(hostId) { it.copy(isLoadingHistory = true) }
             try {
                 val page = client.listTurns(threadId, cursor = cursor, limit = 20, sortDirection = "desc")
-                _state.update { current ->
+                updateHostConnection(hostId) { current ->
                     current.withThreadView(threadId) { view ->
                         view.copy(
                             turns = mergeTurns(page.turns.asReversed(), view.turns),
@@ -700,19 +791,22 @@ class AppController(
                 }
                 syncForegroundService()
             } catch (failure: Throwable) {
-                _state.update { it.copy(isLoadingHistory = false, error = friendlyError(failure)) }
+                updateHostConnection(hostId) {
+                    it.copy(isLoadingHistory = false, error = friendlyError(failure))
+                }
             }
         }
     }
 
     fun startThread(cwd: String) {
-        val client = appServer ?: return showError("请先连接服务器")
+        val hostId = state.value.activeHostId ?: return showError("请先连接服务器")
+        val client = activeClient() ?: return showError("请先连接服务器")
         val path = cwd.trim()
         if (!path.startsWith('/')) return showError("项目路径必须是以 / 开头的远程绝对路径")
         if (!claimBusy()) return
         scope.launch {
             try {
-                val snapshot = state.value
+                val snapshot = state.value.connectionState(hostId)
                 val session = client.startThread(
                     ThreadStartOptions(
                         cwd = path,
@@ -723,7 +817,7 @@ class AppController(
                         permissionProfile = snapshot.selectedPermissionProfileId,
                     ),
                 )
-                _state.update {
+                updateHostConnection(hostId) {
                     val active = it.activeThreadView()
                     val view = ThreadViewState(
                         threadId = session.thread.id,
@@ -732,6 +826,7 @@ class AppController(
                     )
                     it.copy(
                         threads = (it.threads + session.thread).distinctBy(CodexThread::id),
+                        expandedProjectPaths = it.expandedProjectPaths + path,
                         threadViews = trimThreadViews(
                             it.threadViews +
                                 listOfNotNull(active?.let { item -> item.threadId to item }).toMap() +
@@ -744,11 +839,12 @@ class AppController(
                         activeTurnId = null,
                         isTurnRunning = false,
                         olderHistoryCursor = null,
-                        busy = false,
                     ).withSelectedSession(session)
                 }
+                _state.update { it.copy(busy = false) }
             } catch (failure: Throwable) {
-                _state.update { it.copy(busy = false, error = friendlyError(failure)) }
+                _state.update { it.copy(busy = false) }
+                updateHostConnection(hostId) { it.copy(error = friendlyError(failure)) }
             }
         }
     }
@@ -762,15 +858,16 @@ class AppController(
         if (imageDataUrls.sumOf(String::length) > MAX_IMAGE_DATA_CHARS) {
             return showError("图片附件总大小超过限制")
         }
-        val current = state.value
+        val hostId = state.value.activeHostId ?: return showError("请先连接服务器")
+        val current = state.value.connectionState(hostId)
         if (current.isLoadingThread) return showError("会话仍在同步，请稍候")
-        val client = appServer ?: return showError("请先连接服务器")
+        val client = activeClient() ?: return showError("请先连接服务器")
         val threadId = current.selectedThreadId ?: return showError("请先选择会话")
         val session = current.selectedSession ?: return showError("会话尚未恢复")
         if (!claimSending(threadId)) return
         scope.launch {
             try {
-                val snapshot = state.value
+                val snapshot = state.value.connectionState(hostId)
                 if (snapshot.isTurnRunning && !snapshot.activeTurnId.isNullOrBlank()) {
                     client.steerTurn(threadId, snapshot.activeTurnId, body, imageDataUrls)
                 } else {
@@ -789,7 +886,7 @@ class AppController(
                         ),
                         imageDataUrls = imageDataUrls,
                     )
-                    _state.update {
+                    updateHostConnection(hostId) {
                         it.withThreadView(threadId) { view ->
                             view.copy(
                                 turns = trimTurns(upsertTurn(view.turns, turn)),
@@ -800,7 +897,7 @@ class AppController(
                         }
                     }
                 }
-                _state.update {
+                updateHostConnection(hostId) {
                     it.copy(
                         isSending = false,
                         composerEpoch = if (it.selectedThreadId == threadId) {
@@ -811,13 +908,15 @@ class AppController(
                     )
                 }
             } catch (failure: Throwable) {
-                _state.update { it.copy(isSending = false, error = friendlyError(failure)) }
+                updateHostConnection(hostId) {
+                    it.copy(isSending = false, error = friendlyError(failure))
+                }
             }
         }
     }
 
     fun interruptTurn() {
-        val client = appServer ?: return
+        val client = activeClient() ?: return
         val state = state.value
         val threadId = state.selectedThreadId ?: return
         val turnId = state.activeTurnId ?: return
@@ -828,17 +927,23 @@ class AppController(
     }
 
     fun compactThread() {
-        val client = appServer ?: return
+        val hostId = state.value.activeHostId ?: return
+        val client = activeClient() ?: return
         val threadId = state.value.selectedThreadId ?: return
         scope.launch {
             runCatching { client.compactThread(threadId) }
-                .onSuccess { _state.update { it.copy(notice = "已请求压缩会话上下文") } }
-                .onFailure { failure -> showError(friendlyError(failure)) }
+                .onSuccess {
+                    updateHostConnection(hostId) {
+                        it.copy(notice = "已请求压缩会话上下文")
+                    }
+                }
+                .onFailure { failure -> showHostError(hostId, friendlyError(failure)) }
         }
     }
 
     fun reviewUncommittedChanges() {
-        val client = appServer ?: return
+        val hostId = state.value.activeHostId ?: return
+        val client = activeClient() ?: return
         val threadId = state.value.selectedThreadId ?: return
         scope.launch {
             runCatching {
@@ -847,7 +952,7 @@ class AppController(
                     target = buildJsonObject { put("type", "uncommittedChanges") },
                 )
             }.onSuccess { turn ->
-                _state.update { current ->
+                updateHostConnection(hostId) { current ->
                     current.withThreadView(threadId) { view ->
                         view.copy(
                             turns = trimTurns(upsertTurn(view.turns, turn)),
@@ -857,17 +962,18 @@ class AppController(
                         )
                     }
                 }
-            }.onFailure { failure -> showError(friendlyError(failure)) }
+            }.onFailure { failure -> showHostError(hostId, friendlyError(failure)) }
         }
     }
 
     fun forkThread() {
-        val client = appServer ?: return
+        val hostId = state.value.activeHostId ?: return
+        val client = activeClient() ?: return
         val threadId = state.value.selectedThreadId ?: return
         scope.launch {
             runCatching { client.forkThread(threadId) }
                 .onSuccess { session ->
-                    _state.update {
+                    updateHostConnection(hostId) {
                         val active = it.activeThreadView()
                         val view = ThreadViewState(
                             threadId = session.thread.id,
@@ -890,17 +996,18 @@ class AppController(
                         ).withSelectedSession(session)
                     }
                 }
-                .onFailure { failure -> showError(friendlyError(failure)) }
+                .onFailure { failure -> showHostError(hostId, friendlyError(failure)) }
         }
     }
 
     fun archiveSelectedThread() {
-        val client = appServer ?: return
+        val hostId = state.value.activeHostId ?: return
+        val client = activeClient() ?: return
         val threadId = state.value.selectedThreadId ?: return
         scope.launch {
             runCatching { client.archiveThread(threadId) }
                 .onSuccess {
-                    _state.update {
+                    updateHostConnection(hostId) {
                         it.copy(
                             threads = it.threads.filterNot { thread -> thread.id == threadId },
                             threadViews = it.threadViews - threadId,
@@ -911,17 +1018,18 @@ class AppController(
                         )
                     }
                 }
-                .onFailure { failure -> showError(friendlyError(failure)) }
+                .onFailure { failure -> showHostError(hostId, friendlyError(failure)) }
         }
     }
 
     fun unarchiveSelectedThread() {
-        val client = appServer ?: return
+        val hostId = state.value.activeHostId ?: return
+        val client = activeClient() ?: return
         val threadId = state.value.selectedThreadId ?: return
         scope.launch {
             runCatching { client.unarchiveThread(threadId) }
                 .onSuccess { thread ->
-                    _state.update {
+                    updateHostConnection(hostId) {
                         it.copy(
                             threads = it.threads.filterNot { item -> item.id == threadId },
                             threadViews = it.threadViews - threadId,
@@ -932,18 +1040,19 @@ class AppController(
                         )
                     }
                 }
-                .onFailure { failure -> showError(friendlyError(failure)) }
+                .onFailure { failure -> showHostError(hostId, friendlyError(failure)) }
         }
     }
 
     fun renameSelectedThread(name: String) {
-        val client = appServer ?: return
+        val client = activeClient() ?: return
+        val hostId = state.value.activeHostId ?: return
         val threadId = state.value.selectedThreadId ?: return
         if (name.isBlank()) return
         scope.launch {
             runCatching { client.renameThread(threadId, name.trim()) }
-                .onSuccess { refreshThreadsNow() }
-                .onFailure { failure -> showError(friendlyError(failure)) }
+                .onSuccess { refreshThreadsNow(hostId) }
+                .onFailure { failure -> showHostError(hostId, friendlyError(failure)) }
         }
     }
 
@@ -952,26 +1061,34 @@ class AppController(
         decision: String,
         answers: Map<String, List<String>> = emptyMap(),
     ) {
-        val client = appServer ?: return
+        val hostId = state.value.activeHostId ?: return
+        val client = activeClient() ?: return
         val key = request.approvalKey()
-        if (key in state.value.respondingApprovalIds) return
-        _state.update { it.copy(respondingApprovalIds = it.respondingApprovalIds + key) }
+        if (key in state.value.connectionState(hostId).respondingApprovalIds) return
+        updateHostConnection(hostId) {
+            it.copy(respondingApprovalIds = it.respondingApprovalIds + key)
+        }
         scope.launch {
             try {
                 client.approve(request, decision, answers)
-                removeApproval(request)
+                removeApproval(hostId, request)
             } catch (failure: Throwable) {
-                _state.update { it.copy(respondingApprovalIds = it.respondingApprovalIds - key) }
-                showError(friendlyError(failure))
+                updateHostConnection(hostId) {
+                    it.copy(respondingApprovalIds = it.respondingApprovalIds - key)
+                }
+                showHostError(hostId, friendlyError(failure))
             }
         }
     }
 
     fun rejectApproval(request: ApprovalRequest) {
-        val client = appServer ?: return
+        val hostId = state.value.activeHostId ?: return
+        val client = activeClient() ?: return
         val key = request.approvalKey()
-        if (key in state.value.respondingApprovalIds) return
-        _state.update { it.copy(respondingApprovalIds = it.respondingApprovalIds + key) }
+        if (key in state.value.connectionState(hostId).respondingApprovalIds) return
+        updateHostConnection(hostId) {
+            it.copy(respondingApprovalIds = it.respondingApprovalIds + key)
+        }
         scope.launch {
             try {
                 if (request.kind == ApprovalKind.UNKNOWN) {
@@ -979,16 +1096,18 @@ class AppController(
                 } else {
                     client.approve(request, decision = "decline")
                 }
-                removeApproval(request)
+                removeApproval(hostId, request)
             } catch (failure: Throwable) {
-                _state.update { it.copy(respondingApprovalIds = it.respondingApprovalIds - key) }
-                showError(friendlyError(failure))
+                updateHostConnection(hostId) {
+                    it.copy(respondingApprovalIds = it.respondingApprovalIds - key)
+                }
+                showHostError(hostId, friendlyError(failure))
             }
         }
     }
 
-    private fun removeApproval(request: ApprovalRequest) {
-        _state.update { state ->
+    private fun removeApproval(hostId: String, request: ApprovalRequest) {
+        updateHostConnection(hostId) { state ->
             state.copy(
                 approvals = state.approvals.filterNot {
                     it.approvalKey() == request.approvalKey()
@@ -1057,8 +1176,29 @@ class AppController(
     fun deleteHost(hostId: String) {
         scope.launch {
             try {
-                if (state.value.activeHostId == hostId) disconnect()
+                val runtime = runtimes[hostId]
+                if (runtime?.client != null ||
+                    runtime?.transport != null ||
+                    runtime?.connectJob?.isActive == true ||
+                    runtime?.reconnectJob?.isActive == true
+                ) {
+                    disconnect(hostId)
+                }
                 local.deleteHost(hostId)
+                runtimes.remove(hostId)
+                _state.update { current ->
+                    val cleaned = current.copy(hostConnections = current.hostConnections - hostId)
+                    if (current.activeHostId != hostId) {
+                        cleaned
+                    } else {
+                        val replacement = cleaned.hostConnections.keys.firstOrNull()
+                        if (replacement == null) {
+                            cleaned.copy(activeHostId = null)
+                        } else {
+                            cleaned.copy(activeHostId = null).activateHost(replacement)
+                        }
+                    }
+                }
                 refreshHosts()
                 _state.update { it.copy(notice = "服务器已删除") }
             } catch (failure: Throwable) {
@@ -1155,7 +1295,8 @@ class AppController(
     fun dismissPublicKey() = _state.update { it.copy(publicKeyDialog = null) }
 
     fun loadCapabilities() {
-        val client = appServer ?: return
+        val hostId = state.value.activeHostId ?: return
+        val client = activeClient() ?: return
         val cwd = state.value.selectedSession?.cwd
             ?: state.value.selectedThread?.cwd
             ?: return showError("请先选择一个 Codex 会话")
@@ -1173,7 +1314,7 @@ class AppController(
             val plugins = runCatching { client.listPlugins(cwd) }
                 .onFailure { unavailable["Plugins"] = friendlyError(it) }
                 .getOrDefault(emptyList())
-            _state.update {
+            updateHostConnection(hostId) {
                 it.copy(
                     capabilities = CapabilitySnapshot(
                         cwd = cwd,
@@ -1199,17 +1340,32 @@ class AppController(
 
     fun setThreadSearch(value: String) {
         _state.update { it.copy(threadSearch = value) }
-        if (appServer == null) return
-        threadSearchJob?.cancel()
-        threadSearchJob = scope.launch {
+        val hostId = state.value.activeHostId ?: return
+        val runtime = runtimeFor(hostId)
+        if (runtime.client == null) return
+        runtime.threadSearchJob?.cancel()
+        runtime.threadSearchJob = scope.launch {
             if (value.isNotBlank()) delay(350)
-            loadThreadPage(reset = true)
+            loadThreadPage(hostId = hostId, reset = true)
+        }
+    }
+
+    fun toggleProjectExpanded(path: String) {
+        val hostId = state.value.activeHostId ?: return
+        updateHostConnection(hostId) { current ->
+            current.copy(
+                expandedProjectPaths = if (path in current.expandedProjectPaths) {
+                    current.expandedProjectPaths - path
+                } else {
+                    current.expandedProjectPaths + path
+                },
+            )
         }
     }
 
     fun loadMoreThreads() {
         if (state.value.threadNextCursor == null) return
-        loadThreadPage(reset = false)
+        state.value.activeHostId?.let { loadThreadPage(hostId = it, reset = false) }
     }
 
     fun toggleArchivedThreads() {
@@ -1220,7 +1376,7 @@ class AppController(
                 threadNextCursor = null,
             )
         }
-        loadThreadPage(reset = true)
+        state.value.activeHostId?.let { loadThreadPage(hostId = it, reset = true) }
     }
 
     fun setModel(id: String) {
@@ -1238,25 +1394,24 @@ class AppController(
         it.copy(approvalPolicy = value, approvalPolicyValue = JsonPrimitive(value))
     }
     fun setApprovalsReviewer(value: String) = _state.update { it.copy(approvalsReviewer = value) }
-    fun setSandbox(value: String) = _state.update {
-        it.copy(sandbox = value, sandboxPolicyValue = sandboxPolicy(value))
-    }
+    fun setSandbox(value: String) = _state.update { it.withSandboxMode(value) }
     fun setPermissionProfile(value: String?) = _state.update { it.copy(selectedPermissionProfileId = value) }
     fun clearError() = _state.update { it.copy(error = null) }
     fun clearNotice() = _state.update { it.copy(notice = null) }
 
-    private fun refreshThreadsNow() {
-        loadThreadPage(reset = true)
+    private fun refreshThreadsNow(hostId: String) {
+        loadThreadPage(hostId = hostId, reset = true)
     }
 
-    private fun loadThreadPage(reset: Boolean) {
-        val client = appServer ?: return
-        threadListJob?.cancel()
-        val snapshot = state.value
+    private fun loadThreadPage(hostId: String, reset: Boolean) {
+        val runtime = runtimeFor(hostId)
+        val client = runtime.client ?: return
+        runtime.threadListJob?.cancel()
+        val snapshot = state.value.connectionState(hostId)
         if (!reset && snapshot.isLoadingThreads) return
         val cursor = if (reset) null else snapshot.threadNextCursor ?: return
-        threadListJob = scope.launch {
-            _state.update { it.copy(isLoadingThreads = true) }
+        runtime.threadListJob = scope.launch {
+            updateHostConnection(hostId) { it.copy(isLoadingThreads = true) }
             try {
                 val page = client.listThreadsPage(
                     archived = snapshot.showArchivedThreads,
@@ -1264,15 +1419,16 @@ class AppController(
                     cursor = cursor,
                     limit = 60,
                 )
-                if (state.value.threadSearch != snapshot.threadSearch ||
-                    state.value.showArchivedThreads != snapshot.showArchivedThreads
+                val latest = state.value.connectionState(hostId)
+                if (latest.threadSearch != snapshot.threadSearch ||
+                    latest.showArchivedThreads != snapshot.showArchivedThreads
                 ) {
                     return@launch
                 }
                 if (!snapshot.showArchivedThreads && snapshot.threadSearch.isBlank()) {
-                    state.value.activeHostId?.let { local.cacheThreads(it, page.threads) }
+                    local.cacheThreads(hostId, page.threads)
                 }
-                _state.update { state ->
+                updateHostConnection(hostId) { state ->
                     val byId = page.threads.associateBy(CodexThread::id)
                     val threads = if (reset) {
                         page.threads
@@ -1300,28 +1456,31 @@ class AppController(
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (failure: Throwable) {
-                _state.update {
+                updateHostConnection(hostId) {
                     it.copy(isLoadingThreads = false, error = friendlyError(failure))
                 }
             }
         }
     }
 
-    private fun scheduleThreadRefresh() {
-        threadRefreshJob?.cancel()
-        threadRefreshJob = scope.launch {
+    private fun scheduleThreadRefresh(hostId: String) {
+        val runtime = runtimeFor(hostId)
+        runtime.threadRefreshJob?.cancel()
+        runtime.threadRefreshJob = scope.launch {
             delay(350)
-            refreshThreadsNow()
+            refreshThreadsNow(hostId)
         }
     }
 
     private fun scheduleReconnect(hostId: String?) {
-        if (hostId.isNullOrBlank() || userDisconnected || reconnectJob?.isActive == true) return
-        reconnectJob = scope.launch {
-            val selectedThread = state.value.selectedThreadId
+        if (hostId.isNullOrBlank()) return
+        val runtime = runtimeFor(hostId)
+        if (runtime.userDisconnected || runtime.reconnectJob?.isActive == true) return
+        runtime.reconnectJob = scope.launch {
+            val selectedThread = state.value.connectionState(hostId).selectedThreadId
             val delays = longArrayOf(2_000, 5_000, 10_000)
             for ((index, waitMs) in delays.withIndex()) {
-                _state.update {
+                updateHostConnection(hostId) {
                     it.copy(
                         connectionPhase = ConnectionPhase.RECONNECTING,
                         connectionMessage = "连接中断，${waitMs / 1000} 秒后重试（${index + 1}/${delays.size}）",
@@ -1331,12 +1490,16 @@ class AppController(
                 delay(waitMs)
                 try {
                     connectInternal(hostId, reconnect = true, reopenThreadId = selectedThread)
-                    if (state.value.connectionPhase == ConnectionPhase.CONNECTED) return@launch
+                    if (state.value.connectionState(hostId).connectionPhase ==
+                        ConnectionPhase.CONNECTED
+                    ) {
+                        return@launch
+                    }
                 } catch (_: Throwable) {
                     // connectInternal records the user-facing error.
                 }
             }
-            _state.update {
+            updateHostConnection(hostId) {
                 it.copy(
                     connectionPhase = ConnectionPhase.ERROR,
                     connectionMessage = "无法恢复连接；Agent 的实际状态需要在服务器上确认",
@@ -1346,24 +1509,25 @@ class AppController(
         }
     }
 
-    private fun closeCodexConnection() {
-        generation.incrementAndGet()
-        eventJob?.cancel()
-        eventJob = null
-        diagnosticJob?.cancel()
-        diagnosticJob = null
-        threadRefreshJob?.cancel()
-        threadRefreshJob = null
-        threadSearchJob?.cancel()
-        threadSearchJob = null
-        threadListJob?.cancel()
-        threadListJob = null
-        val closingClient = appServer
-        val closingTransport = appServerTransport
-        val closingTunnel = localTunnel
-        appServer = null
-        appServerTransport = null
-        localTunnel = null
+    private fun closeHostConnection(hostId: String) {
+        val runtime = runtimes[hostId] ?: return
+        runtime.generation.incrementAndGet()
+        runtime.eventJob?.cancel()
+        runtime.eventJob = null
+        runtime.diagnosticJob?.cancel()
+        runtime.diagnosticJob = null
+        runtime.threadRefreshJob?.cancel()
+        runtime.threadRefreshJob = null
+        runtime.threadSearchJob?.cancel()
+        runtime.threadSearchJob = null
+        runtime.threadListJob?.cancel()
+        runtime.threadListJob = null
+        val closingClient = runtime.client
+        val closingTransport = runtime.transport
+        val closingTunnel = runtime.localTunnel
+        runtime.client = null
+        runtime.transport = null
+        runtime.localTunnel = null
         cleanupScope.launch {
             runCatching {
                 if (closingClient != null) {
@@ -1443,6 +1607,23 @@ class AppController(
         }
     }
 
+    private fun collaborationModePayload(state: HostConnectionState): JsonObject? {
+        val mode = state.collaborationModes.firstOrNull {
+            it.mode == state.selectedCollaborationMode
+        } ?: return null
+        if (mode.mode == "default") return null
+        return buildJsonObject {
+            put("mode", mode.mode)
+            put("settings", buildJsonObject {
+                put("model", mode.model ?: state.selectedModelId ?: "")
+                val effort = mode.reasoningEffort ?: state.selectedReasoningEffort
+                if (effort == null) put("reasoning_effort", JsonNull)
+                else put("reasoning_effort", JsonPrimitive(effort))
+                put("developer_instructions", JsonNull)
+            })
+        }
+    }
+
     private fun friendlyError(failure: Throwable): String {
         var current: Throwable? = failure
         while (current != null) {
@@ -1480,9 +1661,9 @@ class AppController(
     }
 
     fun close() {
-        userDisconnected = true
+        runtimes.values.forEach { it.userDisconnected = true }
+        runtimes.keys.toList().forEach(::closeHostConnection)
         ConnectionForegroundService.stop(appContext)
-        closeCodexConnection()
         val terminals = _state.value.terminalSessions
         val sshConnections = ssh.detachAllConnections()
         cleanupScope.launch {
@@ -1496,33 +1677,49 @@ class AppController(
 
     private fun syncForegroundService() {
         val current = state.value
-        val connectionActive = current.connectionPhase in setOf(
-            ConnectionPhase.CONNECTING,
-            ConnectionPhase.CONNECTED,
-            ConnectionPhase.RECONNECTING,
-        )
-        val active = !userDisconnected &&
-            (connectionActive || current.terminalSessions.isNotEmpty())
+        val connectionStates = current.hostConnections.values.toMutableList()
+        current.captureActiveHostConnection()?.let { activeConnection ->
+            connectionStates.removeAll { it.hostId == activeConnection.hostId }
+            connectionStates += activeConnection
+        }
+        val connectionActive = connectionStates.any {
+            it.connectionPhase in setOf(
+                ConnectionPhase.CONNECTING,
+                ConnectionPhase.CONNECTED,
+                ConnectionPhase.RECONNECTING,
+            )
+        }
+        val active = connectionActive || current.terminalSessions.isNotEmpty()
         if (!active) {
             ConnectionForegroundService.stop(appContext)
             return
         }
-        val runningView = current.threadViews.values.firstOrNull { it.isTurnRunning }
+        val runningConnection = connectionStates.firstOrNull {
+            it.isTurnRunning || it.threadViews.values.any(ThreadViewState::isTurnRunning)
+        }
         val title = when {
-            current.isTurnRunning || runningView != null -> "Codex Turn 正在执行"
+            runningConnection != null -> "Codex Turn 正在执行"
             current.terminalSessions.isNotEmpty() -> "远程终端已连接"
-            current.connectionPhase == ConnectionPhase.CONNECTED -> "Codex 远程连接已建立"
+            connectionStates.any { it.connectionPhase == ConnectionPhase.CONNECTED } ->
+                "Codex 远程连接已建立"
             else -> "CodexDeck 正在连接"
         }
         val detail = when {
-            current.isTurnRunning ->
-                current.selectedThread?.title ?: current.connectionMessage
-            runningView != null ->
-                current.threads.firstOrNull { it.id == runningView.threadId }?.title
-                    ?: current.connectionMessage
+            runningConnection?.isTurnRunning == true ->
+                runningConnection.selectedThread?.title ?: runningConnection.connectionMessage
+            runningConnection != null -> {
+                val runningView = runningConnection.threadViews.values.firstOrNull {
+                    it.isTurnRunning
+                }
+                runningConnection.threads.firstOrNull { it.id == runningView?.threadId }?.title
+                    ?: runningConnection.connectionMessage
+            }
             current.terminalSessions.isNotEmpty() ->
-                "${current.terminalSessions.size} 个终端 · ${current.connectionMessage}"
-            else -> current.connectionMessage
+                "${current.terminalSessions.size} 个终端"
+            else -> {
+                val connected = connectionStates.filter { it.connectionPhase == ConnectionPhase.CONNECTED }
+                "${connected.size} 台服务器已连接"
+            }
         }
         ConnectionForegroundService.start(appContext, title, detail)
     }
@@ -1627,6 +1824,19 @@ private fun AppState.activeThreadView(): ThreadViewState? {
     )
 }
 
+private fun HostConnectionState.activeThreadView(): ThreadViewState? {
+    val id = selectedThreadId ?: return null
+    return ThreadViewState(
+        threadId = id,
+        session = selectedSession,
+        turns = turns,
+        olderHistoryCursor = olderHistoryCursor,
+        activeTurnId = activeTurnId,
+        isTurnRunning = isTurnRunning,
+        lastUsedAt = threadViews[id]?.lastUsedAt ?: System.currentTimeMillis(),
+    )
+}
+
 private fun AppState.withThreadView(
     threadId: String?,
     transform: (ThreadViewState) -> ThreadViewState,
@@ -1634,6 +1844,41 @@ private fun AppState.withThreadView(
     val id = threadId ?: selectedThreadId ?: return this
     val active = selectedThreadId == id
     val current = if (active) activeThreadView() ?: return this else threadViews[id] ?: return this
+    val updated = transform(current)
+    val views = trimThreadViews(threadViews + (id to updated), selectedThreadId)
+    return if (!active) {
+        copy(threadViews = views)
+    } else {
+        copy(
+            threadViews = views,
+            selectedSession = updated.session,
+            turns = updated.turns,
+            olderHistoryCursor = updated.olderHistoryCursor,
+            activeTurnId = updated.activeTurnId,
+            isTurnRunning = updated.isTurnRunning,
+        )
+    }
+}
+
+private fun HostConnectionState.withThreadView(
+    threadId: String?,
+    transform: (ThreadViewState) -> ThreadViewState,
+): HostConnectionState {
+    val id = threadId ?: selectedThreadId ?: return this
+    val active = selectedThreadId == id
+    val current = if (active) {
+        ThreadViewState(
+            threadId = id,
+            session = selectedSession,
+            turns = turns,
+            olderHistoryCursor = olderHistoryCursor,
+            activeTurnId = activeTurnId,
+            isTurnRunning = isTurnRunning,
+            lastUsedAt = threadViews[id]?.lastUsedAt ?: System.currentTimeMillis(),
+        )
+    } else {
+        threadViews[id]
+    } ?: return this
     val updated = transform(current)
     val views = trimThreadViews(threadViews + (id to updated), selectedThreadId)
     return if (!active) {
@@ -1712,7 +1957,33 @@ private fun AppState.withSelectedSession(session: ThreadSession): AppState = cop
     selectedPermissionProfileId = session.permissionProfile,
 )
 
+private fun HostConnectionState.withSelectedSession(session: ThreadSession): HostConnectionState = copy(
+    selectedModelId = session.model ?: selectedModelId,
+    selectedReasoningEffort = session.reasoningEffort ?: selectedReasoningEffort,
+    selectedCollaborationMode = session.collaborationMode ?: selectedCollaborationMode,
+    approvalPolicy = approvalPolicyLabel(session.approvalPolicy ?: approvalPolicyValue),
+    approvalPolicyValue = session.approvalPolicy ?: approvalPolicyValue,
+    approvalsReviewer = session.approvalsReviewer ?: approvalsReviewer,
+    sandbox = sandboxMode(session.sandbox) ?: sandbox,
+    sandboxPolicyValue = session.sandbox ?: sandboxPolicyValue,
+    selectedPermissionProfileId = session.permissionProfile,
+)
+
 private fun AppState.withSelectedSettings(settings: ThreadSettingsSnapshot): AppState = copy(
+    selectedModelId = settings.model ?: selectedModelId,
+    selectedReasoningEffort = settings.reasoningEffort ?: selectedReasoningEffort,
+    selectedCollaborationMode = settings.collaborationMode ?: selectedCollaborationMode,
+    approvalPolicy = approvalPolicyLabel(settings.approvalPolicy ?: approvalPolicyValue),
+    approvalPolicyValue = settings.approvalPolicy ?: approvalPolicyValue,
+    approvalsReviewer = settings.approvalsReviewer ?: approvalsReviewer,
+    sandbox = settings.sandboxMode ?: sandbox,
+    sandboxPolicyValue = settings.sandboxPolicy ?: sandboxPolicyValue,
+    selectedPermissionProfileId = settings.permissionProfile,
+)
+
+private fun HostConnectionState.withSelectedSettings(
+    settings: ThreadSettingsSnapshot,
+): HostConnectionState = copy(
     selectedModelId = settings.model ?: selectedModelId,
     selectedReasoningEffort = settings.reasoningEffort ?: selectedReasoningEffort,
     selectedCollaborationMode = settings.collaborationMode ?: selectedCollaborationMode,
@@ -1758,6 +2029,12 @@ internal fun sandboxModeLabel(mode: String): String = when (mode) {
     "external-sandbox" -> "外部沙箱"
     else -> "工作区写入"
 }
+
+internal fun AppState.withSandboxMode(mode: String): AppState = copy(
+    sandbox = mode,
+    sandboxPolicyValue = sandboxPolicy(mode),
+    selectedPermissionProfileId = null,
+)
 
 private fun sandboxPolicy(mode: String): JsonObject = buildJsonObject {
     put(

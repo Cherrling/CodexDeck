@@ -71,7 +71,6 @@ import cc.cherr.codexdeck.AppController
 import cc.cherr.codexdeck.AppState
 import cc.cherr.codexdeck.ConnectionPhase
 import cc.cherr.codexdeck.approvalKey
-import cc.cherr.codexdeck.sandboxModeLabel
 import cc.cherr.codexdeck.ssh.usesSshTransport
 import cc.cherr.codexdeck.protocol.CapabilitySnapshot
 import cc.cherr.codexdeck.protocol.ApprovalKind
@@ -142,7 +141,10 @@ fun ChatScreen(
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            state.selectedSession?.cwd ?: state.connectionMessage,
+                            listOfNotNull(
+                                state.activeHost?.label,
+                                state.selectedSession?.cwd ?: state.connectionMessage,
+                            ).joinToString(" · "),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -454,54 +456,34 @@ private fun ControlsBar(state: AppState, controller: AppController) {
             onSelected = { value -> value?.let(controller::setCollaborationMode) },
         )
         PickerChip(
-            label = when (state.approvalPolicy) {
-                "never" -> "无需审批"
-                "untrusted" -> "仅信任操作"
-                "granular" -> "细粒度审批"
-                else -> "按需审批"
-            },
-            options = listOf(
-                "on-request" to "按需审批",
-                "untrusted" to "仅信任操作",
-                "never" to "无需审批",
-            ),
+            label = approvalPolicyOptionLabel(state.approvalPolicy),
+            options = approvalPolicyOptions.map { it.value to it.label },
             onSelected = { value -> value?.let(controller::setApprovalPolicy) },
         )
         PickerChip(
-            label = when (state.approvalsReviewer) {
-                "auto_review" -> "自动审查"
-                "guardian_subagent" -> "Guardian（旧）"
-                else -> "用户审批"
-            },
-            options = listOf(
-                "user" to "用户审批",
-                "auto_review" to "自动审查（风险由子代理判定）",
-                "guardian_subagent" to "Guardian（旧版兼容）",
-            ),
+            label = approvalsReviewerOptionLabel(state.approvalsReviewer),
+            options = approvalsReviewerOptions.map { it.value to it.label },
             onSelected = { value -> value?.let(controller::setApprovalsReviewer) },
         )
-        PickerChip(
-            label = sandboxModeLabel(state.sandbox),
-            options = listOf(
-                "workspace-write" to "工作区写入",
-                "read-only" to "只读",
-                "danger-full-access" to "完全访问（高风险）",
-            ),
-            onSelected = { value -> value?.let(controller::setSandbox) },
+        val permissionPicker = permissionPickerOptions(
+            profiles = state.permissionProfiles,
+            selectedProfileId = state.selectedPermissionProfileId,
+            sandboxMode = state.sandbox,
         )
-        if (state.permissionProfiles.isNotEmpty()) {
-            PickerChip(
-                label = state.selectedPermissionProfileId ?: "权限配置",
-                options = listOf<Pair<String?, String>>(null to "Legacy sandbox") +
-                    state.permissionProfiles
-                        .filter { it.allowed }
-                        .map { it.id to it.id },
-                onSelected = controller::setPermissionProfile,
-                display = { value ->
-                    value ?: "Legacy sandbox"
-                },
-            )
-        }
+        PickerChip(
+            label = permissionPicker.label,
+            options = permissionPicker.options.map { it.value to it.label },
+            onSelected = { value ->
+                value?.let {
+                    if (permissionPicker.profilesSupported) {
+                        controller.setPermissionProfile(it)
+                    } else {
+                        controller.setSandbox(it)
+                    }
+                }
+            },
+            enabled = permissionPicker.options.isNotEmpty(),
+        )
     }
 }
 
@@ -510,18 +492,19 @@ private fun PickerChip(
     label: String,
     options: List<Pair<String?, String>>,
     onSelected: (String?) -> Unit,
-    display: (String?) -> String = { it.orEmpty() },
+    enabled: Boolean = true,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
         AssistChip(
-            onClick = { expanded = true },
+            onClick = { if (enabled) expanded = true },
             label = { Text(label, maxLines = 1) },
+            enabled = enabled,
         )
         DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
             options.forEach { (value, text) ->
                 DropdownMenuItem(
-                    text = { Text(display(value)) },
+                    text = { Text(text) },
                     onClick = {
                         expanded = false
                         onSelected(value)

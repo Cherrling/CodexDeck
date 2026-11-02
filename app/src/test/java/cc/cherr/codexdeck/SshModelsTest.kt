@@ -2,6 +2,7 @@ package cc.cherr.codexdeck
 
 import cc.cherr.codexdeck.data.HostRecord
 import cc.cherr.codexdeck.ssh.appServerCommand
+import cc.cherr.codexdeck.ssh.appServerProxyCommand
 import cc.cherr.codexdeck.ssh.jumpRoute
 import cc.cherr.codexdeck.ssh.shellQuote
 import cc.cherr.codexdeck.ssh.validateHost
@@ -42,6 +43,26 @@ class SshModelsTest {
             shellQuote("a'b"),
         )
         assertTrue(appServerCommand("/opt/codex/bin/codex").contains("exec '/opt/codex/bin/codex'"))
+        assertEquals(
+            "exec 'codex' app-server proxy",
+            appServerProxyCommand("codex"),
+        )
+        assertEquals(
+            "exec 'a'\"'\"'b' app-server proxy",
+            appServerProxyCommand("a'b"),
+        )
+    }
+
+    @Test
+    fun existingAppServerModeRequiresSshExecutable() {
+        val host = host("existing").apply {
+            appServerTransport = "ssh-proxy"
+        }
+
+        assertNull(validateHost(host))
+
+        host.codexExecutable = ""
+        assertTrue(validateHost(host)?.contains("Codex 可执行文件") == true)
     }
 
     @Test

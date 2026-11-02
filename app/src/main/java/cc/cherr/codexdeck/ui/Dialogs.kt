@@ -14,20 +14,20 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,14 +42,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.SecureFlagPolicy
 import cc.cherr.codexdeck.AppController
 import cc.cherr.codexdeck.AppState
 import cc.cherr.codexdeck.PublicKeyDialogData
+import cc.cherr.codexdeck.data.AppServerTransportMode
 import cc.cherr.codexdeck.data.HostDraft
 import cc.cherr.codexdeck.data.HostRecord
 import cc.cherr.codexdeck.data.IdentityGeneration
 import cc.cherr.codexdeck.data.IdentityRecord
 import cc.cherr.codexdeck.ssh.ConnectionPrompt
+import cc.cherr.codexdeck.ssh.SshPrivateKeyInput
 import cc.cherr.codexdeck.ssh.TrustDecision
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -74,7 +77,8 @@ fun HostEditorDialog(
     }
     var identityMenu by remember { mutableStateOf(false) }
     var jumpMenu by remember { mutableStateOf(false) }
-    val showSshSettings = draft.appServerTransport == "ssh" || draft.webSocketViaSsh
+    val showSshSettings =
+        draft.appServerTransport in AppServerTransportMode.sshModes || draft.webSocketViaSsh
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -222,17 +226,43 @@ fun HostEditorDialog(
                     Text("Codex App Server", style = MaterialTheme.typography.titleSmall)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip(
-                            selected = draft.appServerTransport == "ssh",
-                            onClick = { draft = draft.copy(appServerTransport = "ssh") },
-                            label = { Text("SSH stdio") },
+                            selected =
+                                draft.appServerTransport == AppServerTransportMode.SSH_EXISTING,
+                            onClick = {
+                                draft = draft.copy(
+                                    appServerTransport = AppServerTransportMode.SSH_EXISTING,
+                                )
+                            },
+                            label = { Text("已有 App Server") },
                         )
                         FilterChip(
-                            selected = draft.appServerTransport == "websocket",
-                            onClick = { draft = draft.copy(appServerTransport = "websocket") },
-                            label = { Text("WebSocket") },
+                            selected = draft.appServerTransport == AppServerTransportMode.SSH_LAUNCH,
+                            onClick = {
+                                draft = draft.copy(
+                                    appServerTransport = AppServerTransportMode.SSH_LAUNCH,
+                                )
+                            },
+                            label = { Text("启动 stdio") },
                         )
                     }
-                    if (draft.appServerTransport == "websocket") {
+                    FilterChip(
+                        selected = draft.appServerTransport == AppServerTransportMode.WEBSOCKET,
+                        onClick = {
+                            draft = draft.copy(
+                                appServerTransport = AppServerTransportMode.WEBSOCKET,
+                            )
+                        },
+                        label = { Text("WebSocket / SSH Tunnel") },
+                    )
+                    if (draft.appServerTransport == AppServerTransportMode.SSH_EXISTING) {
+                        Text(
+                            "通过 codex app-server proxy 连接当前用户已运行的 daemon；" +
+                                "不会启动第二个 App Server。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (draft.appServerTransport == AppServerTransportMode.WEBSOCKET) {
                         OutlinedTextField(
                             value = draft.appServerUrl,
                             onValueChange = { draft = draft.copy(appServerUrl = it) },
@@ -326,13 +356,21 @@ fun HostEditorDialog(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    if (draft.appServerTransport == "ssh") {
+                    if (draft.appServerTransport in AppServerTransportMode.sshModes) {
                         OutlinedTextField(
                             value = draft.codexExecutable,
                             onValueChange = { draft = draft.copy(codexExecutable = it) },
                             label = { Text("远端 Codex 可执行文件") },
                             supportingText = {
-                                Text("例如 codex 或 /opt/codex/bin/codex；不拼接额外 shell 参数")
+                                Text(
+                                    if (draft.appServerTransport ==
+                                        AppServerTransportMode.SSH_EXISTING
+                                    ) {
+                                        "执行 codex app-server proxy；例如 codex 或 /opt/codex/bin/codex"
+                                    } else {
+                                        "执行 codex app-server --listen stdio://；创建独立进程"
+                                    },
+                                )
                             },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
@@ -394,95 +432,130 @@ fun HostEditorDialog(
 
 @Composable
 fun ImportIdentityDialog(
+    busy: Boolean,
     onDismiss: () -> Unit,
     onImport: (String, ByteArray, String) -> Unit,
 ) {
     var label by remember { mutableStateOf("") }
+    var pasted by remember { mutableStateOf("") }
     var passphrase by remember { mutableStateOf("") }
     var uri by remember { mutableStateOf<Uri?>(null) }
-    var bytes by remember { mutableStateOf<ByteArray?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(false) }
-    DisposableEffect(Unit) {
-        onDispose {
-            bytes?.fill(0)
-            bytes = null
-        }
-    }
+    val interactionBusy = busy || loading
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { selected ->
         if (selected == null) return@rememberLauncherForActivityResult
-        loading = true
-        scope.launch {
-            try {
-                val data = withContext(Dispatchers.IO) {
-                    context.contentResolver.openInputStream(selected)?.use { input ->
-                        val output = java.io.ByteArrayOutputStream()
-                        val buffer = ByteArray(8192)
-                        while (true) {
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            require(output.size() + count <= 256 * 1024) { "私钥不能超过 256 KiB" }
-                            output.write(buffer, 0, count)
-                        }
-                        buffer.fill(0)
-                        output.toByteArray()
-                    } ?: error("无法读取所选文件")
-                }
-                bytes?.fill(0)
-                bytes = data
-                uri = selected
-            } catch (failure: Throwable) {
-                // The shared error dialog is reserved for controller errors.
-                bytes = null
-                uri = null
-                errorMessage = failure.message ?: "读取私钥失败"
-            } finally {
-                loading = false
-            }
-        }
+        uri = selected
+        pasted = ""
+        errorMessage = null
     }
     AlertDialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(securePolicy = androidx.compose.ui.window.SecureFlagPolicy.SecureOn),
+        onDismissRequest = { if (!interactionBusy) onDismiss() },
+        properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
         title = { Text("导入 SSH 私钥") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 OutlinedTextField(
                     label,
                     { label = it },
                     label = { Text("身份名称") },
                     singleLine = true,
+                    enabled = !interactionBusy,
                 )
-                TextButton(onClick = { picker.launch(arrayOf("*/*")) }, enabled = !loading) {
-                    Text(if (uri == null) "选择 OpenSSH / PEM / PKCS#8 文件" else "已选择：${uri?.lastPathSegment}")
+                Text(
+                    "支持 OpenSSH 与 PEM / PKCS#8 私钥（Ed25519、RSA、ECDSA）；私钥加密保存。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(
+                    onClick = { picker.launch(arrayOf("*/*")) },
+                    enabled = !interactionBusy,
+                ) {
+                    Text(
+                        if (uri == null) {
+                            "选择私钥文件"
+                        } else {
+                            "已选择：${uri?.lastPathSegment ?: "私钥文件"}"
+                        },
+                    )
+                }
+                if (uri == null) {
+                    OutlinedTextField(
+                        pasted,
+                        {
+                            if (it.length <= SshPrivateKeyInput.MAX_BYTES) pasted = it
+                        },
+                        label = { Text("或粘贴私钥") },
+                        minLines = 3,
+                        maxLines = 5,
+                        enabled = !interactionBusy,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    )
+                } else {
+                    TextButton(
+                        onClick = {
+                            uri = null
+                            errorMessage = null
+                        },
+                        enabled = !interactionBusy,
+                    ) {
+                        Text("改用粘贴")
+                    }
                 }
                 OutlinedTextField(
                     passphrase,
                     { passphrase = it },
                     label = { Text("原私钥口令（如未加密可留空）") },
                     singleLine = true,
+                    enabled = !interactionBusy,
                     visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 )
-                if (loading) CircularProgressIndicator()
+                if (interactionBusy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
         confirmButton = {
             TextButton(
-                enabled = !loading,
+                enabled = !interactionBusy && (uri != null || pasted.isNotBlank()),
                 onClick = {
-                    val pem = bytes
-                    if (pem == null) {
-                        errorMessage = "请选择私钥文件"
-                    } else {
-                        onImport(label, pem, passphrase)
+                    val selectedUri = uri
+                    if (selectedUri == null && pasted.isBlank()) {
+                        errorMessage = "请选择私钥文件或粘贴私钥"
+                        return@TextButton
+                    }
+                    loading = true
+                    errorMessage = null
+                    scope.launch {
+                        try {
+                            val pem = if (selectedUri == null) {
+                                SshPrivateKeyInput.fromPaste(pasted)
+                            } else {
+                                withContext(Dispatchers.IO) {
+                                    context.contentResolver.openInputStream(selectedUri)?.use {
+                                        SshPrivateKeyInput.readFromStream(it)
+                                    } ?: error("无法读取所选文件")
+                                }
+                            }
+                            onImport(label, pem, passphrase)
+                        } catch (failure: Throwable) {
+                            errorMessage = failure.message ?: "读取私钥失败"
+                        } finally {
+                            loading = false
+                        }
                     }
                 },
             ) { Text("导入") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !interactionBusy) { Text("取消") }
+        },
     )
 }
 

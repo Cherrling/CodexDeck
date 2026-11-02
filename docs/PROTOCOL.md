@@ -35,6 +35,17 @@ One JSON object per line. App-server usually omits the optional top-level
 `"jsonrpc":"2.0"` member on its wire format even though request/response semantics are
 JSON-RPC-like.
 
+The preferred “existing App Server” Host runs:
+
+```text
+exec '<codex>' app-server proxy
+```
+
+`proxy` transparently bridges these JSONL bytes to the running local Unix control
+socket. It preserves request IDs and notification framing, but does not create a second
+runtime. A separate `--listen stdio://` process remains available for an intentionally
+isolated Thread environment.
+
 ### WebSocket
 
 One JSON document per WebSocket text frame. CodexDeck does not append a newline or split
@@ -100,9 +111,10 @@ CodexDeck selects exactly one form: when a named profile is active it sends
 `permissions`; otherwise it sends the legacy sandbox field. Plan mode is sent through
 the experimental `collaborationMode` payload on the next Turn.
 
-`approvalPolicy` is retained as a JSON value rather than narrowed to a string. Current
-`AskForApproval` permits `untrusted`, `on-request`, `never`, or an experimental
-`{"granular": {...}}` object containing `sandbox_approval`, `rules`,
+`approvalPolicy` is retained as a JSON value rather than narrowed to a string. Clients
+must not explicitly submit the retired `untrusted` policy. Current choices are
+`on-request`, `never`, or an experimental `{"granular": {...}}` object containing
+`sandbox_approval`, `rules`,
 `skill_approval`, `request_permissions`, and `mcp_elicitations`. Re-encoding only the
 enum name would silently discard a granular policy selected by the server or another
 client.
@@ -112,7 +124,8 @@ client.
 `networkAccess`, `writableRoots`, `excludeSlashTmp`, and `excludeTmpdirEnvVar` are
 authoritative. The client must not synthesize a simplified policy that loses them.
 `approvalsReviewer` is synchronized independently and supports `user` or the
-experimental `auto_review` routing mode when the server returns it.
+experimental `auto_review` routing mode. `guardian_subagent` remains an accepted
+wire alias for `auto_review` compatibility, but it is not a separate selectable mode.
 
 Granular approval policies and `auto_review` are experimental. CodexDeck preserves and
 displays returned values but does not claim that strict automatic-review decision
@@ -197,6 +210,11 @@ Android resumed it. Server-returned settings are authoritative for the UI, and
 The protocol supports multiple client connections to one app-server process and
 multiple subscriptions to a loaded Thread. This is the mechanism behind shared PC/mobile
 observation.
+
+For a local managed daemon, use the SSH Host mode `SSH_EXISTING`. CodexDeck executes
+`codex app-server proxy` over the SSH exec channel, reaching the same app-server process
+without exposing a TCP port. Do not replace this with a new
+`codex app-server --listen stdio://` process when shared active Turn state is required.
 
 To connect the PC TUI to the same live runtime:
 

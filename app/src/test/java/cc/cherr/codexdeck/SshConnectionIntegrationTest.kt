@@ -198,6 +198,20 @@ class SshConnectionIntegrationTest {
             } finally {
                 client.close()
             }
+
+            val existingDaemonClient = AppServerClient(
+                transport = connection.openExistingAppServer(target.codexExecutable),
+                clientInfo = ClientInfo(version = "ssh-existing-server-integration-test"),
+            )
+            try {
+                assertEquals(
+                    "codexdeck-ssh-integration-test",
+                    existingDaemonClient.initialize().userAgent,
+                )
+                assertTrue(existingDaemonClient.listThreadsPage(limit = 1).threads.isEmpty())
+            } finally {
+                existingDaemonClient.close()
+            }
             assertTrue(manager.isConnected(target.id))
         } finally {
             manager.close()

@@ -34,7 +34,7 @@ enum class TerminalModifier {
 }
 
 class ShellTerminalController(
-    private val context: Context,
+    private val appContext: Context,
     transport: TerminalTransport,
     private val onFinished: () -> Unit,
     initialFontSizeSp: Int = 13,
@@ -63,7 +63,7 @@ class ShellTerminalController(
         session.updateSize(80, 24, 8, 16)
     }
 
-    fun createView(): TerminalView = TerminalView(context, null).also { terminal ->
+    fun createView(context: Context): TerminalView = TerminalView(context, null).also { terminal ->
         viewReference = WeakReference(terminal)
         terminal.setTerminalViewClient(this)
         terminal.setTypeface(Typeface.MONOSPACE)
@@ -161,8 +161,7 @@ class ShellTerminalController(
         ) {
             return false
         }
-        windowController(terminal)
-            ?.hide(WindowInsetsCompat.Type.ime())
+        windowController(terminal)?.hide(WindowInsetsCompat.Type.ime())
         return true
     }
 
@@ -171,8 +170,7 @@ class ShellTerminalController(
         if (ViewCompat.getRootWindowInsets(terminal)
                 ?.isVisible(WindowInsetsCompat.Type.ime()) == true
         ) {
-            windowController(terminal)
-                ?.hide(WindowInsetsCompat.Type.ime())
+            windowController(terminal)?.hide(WindowInsetsCompat.Type.ime())
         } else {
             showKeyboard()
         }
@@ -182,14 +180,14 @@ class ShellTerminalController(
         view?.let { terminal ->
             val text = terminal.selectedText
             if (!text.isNullOrEmpty()) {
-                context.getSystemService(ClipboardManager::class.java)
+                appContext.getSystemService(ClipboardManager::class.java)
                     .setPrimaryClip(ClipData.newPlainText("Terminal", text))
             }
         }
     }
 
     fun pasteFromClipboard() {
-        val clip = context.getSystemService(ClipboardManager::class.java).primaryClip
+        val clip = appContext.getSystemService(ClipboardManager::class.java).primaryClip
         if (clip != null && clip.itemCount > 0) {
             clip.getItemAt(0).text?.toString()?.let { text ->
                 if (text.length <= 128 * 1024) session.emulator?.paste(text)
@@ -219,7 +217,7 @@ class ShellTerminalController(
 
     override fun onCopyTextToClipboard(session: TerminalSession, text: String?) {
         if (!text.isNullOrEmpty()) {
-            context.getSystemService(ClipboardManager::class.java)
+            appContext.getSystemService(ClipboardManager::class.java)
                 .setPrimaryClip(ClipData.newPlainText("Terminal", text))
         }
     }
@@ -318,7 +316,7 @@ class ShellTerminalController(
     override fun logStackTrace(tag: String?, e: Exception?) = Unit
 
     private fun windowController(view: TerminalView) =
-        context.findActivity()?.let { activity ->
+        view.context.findActivity()?.let { activity ->
             WindowCompat.getInsetsController(activity.window, view)
         }
 }
