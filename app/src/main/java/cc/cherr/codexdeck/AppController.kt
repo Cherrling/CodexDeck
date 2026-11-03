@@ -2087,7 +2087,11 @@ private fun upsertItem(
     if (existingTurn >= 0) {
         return turns.toMutableList().also { copy ->
             val turn = copy[existingTurn]
-            copy[existingTurn] = turn.copy(items = turn.items.map { if (it.id == item.id) item else it })
+            copy[existingTurn] = turn.copy(
+                items = turn.items.map { existing ->
+                    if (existing.id == item.id) mergeItemRecord(existing, item) else existing
+                },
+            )
         }
     }
     val targetIndex = turns.indexOfLast { it.id == preferredTurnId }
@@ -2114,6 +2118,15 @@ private fun upsertItem(
         ),
     )
 }
+
+internal fun mergeItemRecord(existing: ThreadItem, incoming: ThreadItem): ThreadItem =
+    if (existing.type == "reasoning" && incoming.type == "reasoning") {
+        // item/completed can omit summary/content on some compatible providers. Preserve
+        // streamed reasoning fields so the final upsert does not erase received text.
+        incoming.copy(raw = JsonObject(existing.raw + incoming.raw))
+    } else {
+        incoming
+    }
 
 private fun upsertTurn(turns: List<ThreadTurn>, turn: ThreadTurn): List<ThreadTurn> {
     val index = turns.indexOfFirst { it.id == turn.id }

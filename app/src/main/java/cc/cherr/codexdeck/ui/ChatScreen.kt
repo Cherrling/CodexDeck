@@ -31,6 +31,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -49,12 +50,14 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -119,8 +122,12 @@ fun ChatScreen(
     }
     val rowsLastIndex by rememberUpdatedState(rows.lastIndex)
     val isDragged by listState.interactionSource.collectIsDraggedAsState()
+    val showScrollToBottom by remember(listState) {
+        derivedStateOf { listState.canScrollForward }
+    }
+    val scrollScope = rememberCoroutineScope()
 
-    LaunchedEffect(rows, autoFollow) {
+    LaunchedEffect(rows) {
         if (rows.isNotEmpty() && autoFollow) {
             listState.scrollToItem(rows.lastIndex)
         }
@@ -267,32 +274,52 @@ fun ChatScreen(
                     CircularProgressIndicator()
                 }
             } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    state = listState,
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                        start = 12.dp,
-                        end = 12.dp,
-                        top = 10.dp,
-                        bottom = 16.dp,
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    if (rows.isEmpty()) {
-                        item {
-                            EmptyPanel(
-                                title = "Thread 已恢复",
-                                detail = "发送第一条消息开始执行。所有 Agent 事件都来自远端 app-server。",
-                            )
+                Box(Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        state = listState,
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            start = 12.dp,
+                            end = 12.dp,
+                            top = 10.dp,
+                            bottom = 16.dp,
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (rows.isEmpty()) {
+                            item {
+                                EmptyPanel(
+                                    title = "Thread 已恢复",
+                                    detail = "发送第一条消息开始执行。所有 Agent 事件都来自远端 app-server。",
+                                )
+                            }
+                        }
+                        items(
+                            count = rows.size,
+                            key = { index -> rows[index].key },
+                        ) { index ->
+                            when (val row = rows[index]) {
+                                is TimelineRow.TurnHeader -> TurnHeader(row.turn)
+                                is TimelineRow.Entry -> ItemCard(row.item, row.turnStatus)
+                            }
                         }
                     }
-                    items(
-                        count = rows.size,
-                        key = { index -> rows[index].key },
-                    ) { index ->
-                        when (val row = rows[index]) {
-                            is TimelineRow.TurnHeader -> TurnHeader(row.turn)
-                            is TimelineRow.Entry -> ItemCard(row.item)
+                    if (showScrollToBottom && rows.isNotEmpty()) {
+                        SmallFloatingActionButton(
+                            onClick = {
+                                autoFollow = true
+                                scrollScope.launch {
+                                    listState.animateScrollToItem(rows.lastIndex)
+                                }
+                            },
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(16.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.KeyboardArrowDown,
+                                contentDescription = "回到底部",
+                            )
                         }
                     }
                 }
@@ -674,7 +701,10 @@ private sealed interface TimelineRow {
         override val key: String = "turn:${turn.id}"
     }
 
-    data class Entry(val item: ThreadItem) : TimelineRow {
+    data class Entry(
+        val item: ThreadItem,
+        val turnStatus: String,
+    ) : TimelineRow {
         override val key: String = "item:${item.id}"
     }
 }
@@ -683,7 +713,7 @@ private fun buildTimelineRows(turns: List<ThreadTurn>): List<TimelineRow> =
     turns.flatMap { turn ->
         buildList {
             add(TimelineRow.TurnHeader(turn))
-            turn.items.forEach { add(TimelineRow.Entry(it)) }
+            turn.items.forEach { add(TimelineRow.Entry(it, turn.status)) }
         }
     }
 
@@ -726,11 +756,11 @@ private fun TurnHeader(turn: ThreadTurn) {
 }
 
 @Composable
-private fun ItemCard(item: ThreadItem) {
+private fun ItemCard(item: ThreadItem, turnStatus: String) {
     when (item.type) {
         "userMessage" -> UserMessageCard(item)
         "agentMessage" -> AgentMessageCard(item)
-        "reasoning" -> ReasoningCard(item)
+        "reasoning" -> ReasoningCard(item, turnStatus)
         "plan" -> GenericCard("Plan", item.text, Color(0xFF8FB8FF))
         "commandExecution" -> CommandCard(item)
         "fileChange" -> FileChangeCard(item)
@@ -802,14 +832,19 @@ private fun AgentMessageCard(item: ThreadItem) {
 }
 
 @Composable
-private fun ReasoningCard(item: ThreadItem) {
+private fun ReasoningCard(item: ThreadItem, turnStatus: String) {
     var expanded by remember(item.id) { mutableStateOf(false) }
-    val summary = buildList {
-        addAll(arrayStrings(item.raw["summary"]))
-        addAll(arrayStrings(item.raw["content"]))
-        item.raw["reasoningSummary"]?.stringValue()?.let(::add)
-        item.raw["reasoningText"]?.stringValue()?.let(::add)
-    }.filter(String::isNotBlank).joinToString("\n\n")
+    val finalParts = arrayStrings(item.raw["summary"]) + arrayStrings(item.raw["content"])
+    val streamedParts = listOfNotNull(
+        item.raw["reasoningSummary"]?.stringValue(),
+        item.raw["reasoningText"]?.stringValue(),
+    )
+    val summary = finalParts
+        .takeIf { parts -> parts.any(String::isNotBlank) }
+        ?: streamedParts
+    val summaryText = summary
+        .filter(String::isNotBlank)
+        .joinToString("\n\n")
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -822,7 +857,13 @@ private fun ReasoningCard(item: ThreadItem) {
             if (expanded) {
                 SelectionContainer {
                     Text(
-                        summary.ifBlank { "等待 reasoning 摘要…" },
+                        summaryText.ifBlank {
+                            if (turnStatus == "inProgress") {
+                                "正在推理；摘要会在服务端返回后显示。"
+                            } else {
+                                "本次推理已结束，但模型或第三方提供商没有返回 reasoning 摘要。"
+                            }
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

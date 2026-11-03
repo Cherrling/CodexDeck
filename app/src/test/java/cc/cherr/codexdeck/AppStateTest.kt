@@ -4,11 +4,14 @@ import cc.cherr.codexdeck.protocol.ApprovalKind
 import cc.cherr.codexdeck.protocol.ApprovalRequest
 import cc.cherr.codexdeck.protocol.CodexThread
 import cc.cherr.codexdeck.protocol.RequestId
+import cc.cherr.codexdeck.protocol.ThreadItem
 import cc.cherr.codexdeck.protocol.ThreadRuntimeStatus
 import cc.cherr.codexdeck.protocol.ThreadTurn
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -85,6 +88,34 @@ class AppStateTest {
         assertEquals(listOf("thread-1", "user-feature"), visible.map(CodexThread::id))
         assertEquals("Newest title", visible.first().title)
         assertEquals("active", visible.first().status.type)
+    }
+
+    @Test
+    fun completedReasoningKeepsPreviouslyStreamedSummary() {
+        val streamed = ThreadItem(
+            id = "reasoning-1",
+            type = "reasoning",
+            status = "inProgress",
+            raw = buildJsonObject {
+                put("reasoningSummary", "streamed summary")
+            },
+        )
+        val completed = ThreadItem(
+            id = "reasoning-1",
+            type = "reasoning",
+            status = "",
+            raw = buildJsonObject {
+                put("summary", JsonArray(emptyList()))
+                put("content", JsonArray(emptyList()))
+            },
+        )
+
+        val merged = mergeItemRecord(streamed, completed)
+
+        assertEquals(
+            "streamed summary",
+            merged.raw["reasoningSummary"]?.jsonPrimitive?.content,
+        )
     }
 
     @Test
