@@ -38,6 +38,7 @@ class AppServerClient(
     private val clientInfo: ClientInfo,
     scope: CoroutineScope? = null,
     private val requestTimeout: Duration = 30.seconds,
+    private val onTrace: ((RpcTraceEvent) -> Unit)? = null,
 ) : Closeable {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -593,15 +594,49 @@ class AppServerClient(
         val id = requestIds.getAndIncrement()
         val response = CompletableDeferred<JsonElement>()
         pending[id] = response
+        val startedAtNanos = System.nanoTime()
+        trace(RpcTraceEvent(phase = RpcTracePhase.REQUEST, method = method, requestId = id.toString()))
         try {
             send(buildJsonObject {
                 put("id", id)
                 put("method", method)
                 put("params", params)
             })
-            return withTimeout(timeout) { response.await() }.asObjectOrEmpty()
+            val result = withTimeout(timeout) { response.await() }.asObjectOrEmpty()
+            trace(
+                RpcTraceEvent(
+                    phase = RpcTracePhase.COMPLETED,
+                    method = method,
+                    requestId = id.toString(),
+                    durationMs = elapsedMillis(startedAtNanos),
+                ),
+            )
+            return result
         } catch (timeoutError: TimeoutCancellationException) {
+            trace(
+                RpcTraceEvent(
+                    phase = RpcTracePhase.TIMEOUT,
+                    method = method,
+                    requestId = id.toString(),
+                    durationMs = elapsedMillis(startedAtNanos),
+                    errorMessage = timeoutError.message,
+                ),
+            )
             throw RpcException(message = "App-server request timed out: $method", cause = timeoutError)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            trace(
+                RpcTraceEvent(
+                    phase = RpcTracePhase.FAILED,
+                    method = method,
+                    requestId = id.toString(),
+                    durationMs = elapsedMillis(startedAtNanos),
+                    errorCode = (failure as? RpcException)?.code,
+                    errorMessage = failure.message,
+                ),
+            )
+            throw failure
         } finally {
             pending.remove(id)
         }
@@ -704,7 +739,21 @@ class AppServerClient(
         if (method != null) handleNotification(method, params)
     }
 
+    private fun trace(event: RpcTraceEvent) {
+        runCatching { onTrace?.invoke(event) }
+    }
+
     private suspend fun handleServerRequest(id: RequestId, method: String, params: JsonObject) {
+        trace(
+            RpcTraceEvent(
+                phase = RpcTracePhase.SERVER_REQUEST,
+                method = method,
+                requestId = when (id) {
+                    is RequestId.Number -> id.value.toString()
+                    is RequestId.Text -> id.value
+                },
+            ),
+        )
         val request = when (method) {
             "item/commandExecution/requestApproval", "execCommandApproval" -> ApprovalRequest(
                 requestId = id,
@@ -1121,3 +1170,6 @@ class AppServerClient(
             asObject() ?: JsonObject(emptyMap())
     }
 }
+
+private fun elapsedMillis(startedAtNanos: Long): Long =
+    ((System.nanoTime() - startedAtNanos) / 1_000_000L).coerceAtLeast(0L)

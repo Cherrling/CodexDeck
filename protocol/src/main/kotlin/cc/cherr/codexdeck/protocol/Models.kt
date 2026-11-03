@@ -218,6 +218,27 @@ class RpcException(
     cause: Throwable? = null,
 ) : Exception(message, cause)
 
+enum class RpcTracePhase {
+    REQUEST,
+    COMPLETED,
+    FAILED,
+    TIMEOUT,
+    SERVER_REQUEST,
+}
+
+/**
+ * Metadata-only RPC tracing. Request/response bodies and notification payloads deliberately never
+ * appear here, so diagnostic logging can identify protocol behavior without recording chat text.
+ */
+data class RpcTraceEvent(
+    val phase: RpcTracePhase,
+    val method: String,
+    val requestId: String? = null,
+    val durationMs: Long? = null,
+    val errorCode: Int? = null,
+    val errorMessage: String? = null,
+)
+
 enum class ApprovalKind {
     COMMAND,
     FILE_CHANGE,

@@ -17,6 +17,7 @@ import androidx.compose.runtime.setValue
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import cc.cherr.codexdeck.ssh.TerminalFailureSource
 import com.termux.terminal.KeyHandler
 import com.termux.terminal.TerminalColors
 import com.termux.terminal.TerminalSession
@@ -37,9 +38,11 @@ class ShellTerminalController(
     private val appContext: Context,
     transport: TerminalTransport,
     private val onFinished: () -> Unit,
+    private val onFailure: (String) -> Unit,
     initialFontSizeSp: Int = 13,
 ) : TerminalSessionClient, TerminalViewClient {
     val session = TerminalSession(transport, 5_000, this)
+    private val terminalFailureSource = transport as? TerminalFailureSource
     private var viewReference = WeakReference<TerminalView>(null)
     private val view: TerminalView? get() = viewReference.get()
 
@@ -213,7 +216,14 @@ class ShellTerminalController(
             .ifBlank { "Shell" }
     }
 
-    override fun onSessionFinished(finishedSession: TerminalSession) = onFinished()
+    override fun onSessionFinished(finishedSession: TerminalSession) {
+        val failure = terminalFailureSource?.terminalFailure
+        if (failure == null) {
+            onFinished()
+        } else {
+            onFailure(failure)
+        }
+    }
 
     override fun onCopyTextToClipboard(session: TerminalSession, text: String?) {
         if (!text.isNullOrEmpty()) {

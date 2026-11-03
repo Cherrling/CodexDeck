@@ -125,6 +125,7 @@ Researched revisions:
 | --- | --- | --- |
 | Material 3 dark-first Compose UI | Implemented | Dynamic color, dark default, high-density chat, Hosts/Identities/Sessions/Settings/Terminal screens. |
 | Bounded memory and streaming performance | Implemented | LRU views, Turn limit, field/queue/frame bounds, batched deltas, LazyColumn stable keys. |
+| Opt-in diagnostic logging | Implemented, UI device-unverified | Default off; immediate disable, bounded 256 KiB/2,000-line rotation, credential/private-key redaction, synchronous crash capture, and in-app view/copy/share/clear. JVM tests cover disabled writes, redaction, fatal writes, and rotation. |
 | Foreground connection service | Implemented, device-unverified | Data-sync service with one low-importance notification, Disconnect action, and API 35 timeout handling; no wakelock or polling. |
 | Automatic last Host/Thread restore | Implemented, default off | Persisted non-secret restore marker is read only when the user enables launch auto-connect; device lifecycle behavior remains unverified. |
 | Main CI on push | Verified | GitHub run `41511422653` passed protocol/app/terminal tests, Docker OpenSSH/ProxyJump/PTY, lint, APK build/signature verification, and artifact upload. |

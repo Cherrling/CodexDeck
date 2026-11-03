@@ -125,6 +125,44 @@ class AppServerClientTest {
     }
 
     @Test
+    fun rpcTraceReportsMethodOutcomeAndServerErrorWithoutPayloads() = runTest {
+        val transport = FakeTransport()
+        val traces = mutableListOf<RpcTraceEvent>()
+        val client = AppServerClient(
+            transport = transport,
+            clientInfo = ClientInfo(version = "test"),
+            scope = this,
+            onTrace = traces::add,
+        )
+        val initialize = async { client.initialize() }
+        transport.emit(ok(transport.receiveRequest().id, buildJsonObject {}))
+        initialize.await()
+        transport.receiveNotification()
+
+        val listing = async { runCatching { client.listThreadsPage(limit = 1) } }
+        val request = transport.receiveRequest()
+        transport.emit(
+            buildJsonObject {
+                put("id", request.id)
+                put("error", buildJsonObject {
+                    put("code", -32000)
+                    put("message", "Thread already has an active writer")
+                })
+            },
+        )
+        val failure = listing.await().exceptionOrNull()
+        assertTrue(failure is RpcException)
+
+        val failed = traces.single {
+            it.phase == RpcTracePhase.FAILED && it.method == "thread/list"
+        }
+        assertEquals(-32000, failed.errorCode)
+        assertEquals("Thread already has an active writer", failed.errorMessage)
+        assertTrue(traces.none { it.method != "initialize" && it.method != "thread/list" })
+        client.close()
+    }
+
+    @Test
     fun parsesThreadTurnAndToolItemsWithoutFailOnUnknownFields() = runTest {
         val thread = AppServerClient.parseThread(threadJson("thread-1", "Test"))
         assertTrue(thread != null)

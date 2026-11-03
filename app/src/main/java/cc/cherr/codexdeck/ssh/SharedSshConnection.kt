@@ -227,10 +227,14 @@ class SshJsonLineTransport internal constructor(
  * Termux's terminal emulator consumes this transport. Closing a terminal channel does not close
  * the shared SSH route; closing the route closes every channel.
  */
+internal interface TerminalFailureSource {
+    val terminalFailure: String?
+}
+
 private class SharedSshTerminalTransport(
     private val connection: SharedSshConnection,
     private val ssh: SSHClient,
-) : TerminalTransport {
+) : TerminalTransport, TerminalFailureSource {
     private val closed = AtomicBoolean()
     private val outputLock = Any()
     private val pendingOutput = ArrayDeque<ByteArray>()
@@ -249,6 +253,10 @@ private class SharedSshTerminalTransport(
     private var session: Session? = null
     private var listener: TerminalTransport.Listener? = null
     private val channelHandle = Closeable { close() }
+
+    @Volatile
+    override var terminalFailure: String? = null
+        private set
 
     init {
         connection.track(channelHandle)
@@ -280,8 +288,15 @@ private class SharedSshTerminalTransport(
                     if (count > 0) listener.onBytes(bytes, count)
                 }
                 status = 0
+            } catch (failure: Exception) {
+                if (!closed.get()) {
+                    terminalFailure = terminalFailureMessage(failure)
+                    val bytes = "\r\n\r\n[CodexDeck] $terminalFailure\r\n"
+                        .toByteArray(Charsets.UTF_8)
+                    runCatching { listener.onBytes(bytes, bytes.size) }
+                }
             } finally {
-                listener.onClosed(status)
+                runCatching { listener.onClosed(status) }
                 close()
             }
         }
@@ -365,4 +380,18 @@ private class SharedSshTerminalTransport(
         reader.shutdownNow()
         connection.untrack(channelHandle)
     }
+}
+
+internal fun terminalFailureMessage(failure: Throwable): String {
+    val detail = generateSequence(failure) { it.cause }
+        .mapNotNull { it.message?.trim()?.takeIf(String::isNotEmpty) }
+        .lastOrNull()
+        ?: failure.javaClass.simpleName
+    val safeDetail = detail
+        .map { if (it.isISOControl()) ' ' else it }
+        .joinToString("")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+        .take(500)
+    return "SSH Shell 启动失败：$safeDetail"
 }

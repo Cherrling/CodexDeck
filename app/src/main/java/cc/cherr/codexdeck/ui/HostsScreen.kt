@@ -274,10 +274,19 @@ private fun HostCard(
             }
             if (connection.connectionPhase == ConnectionPhase.ERROR) {
                 Text(
-                    connection.connectionMessage,
+                    buildString {
+                        append(connection.connectionMessage)
+                        connection.lastDiagnostic
+                            ?.trim()
+                            ?.takeIf(String::isNotEmpty)
+                            ?.let {
+                                append("\n\nSSH 诊断：")
+                                append(it)
+                            }
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
-                    maxLines = 2,
+                    maxLines = 8,
                     overflow = TextOverflow.Ellipsis,
                 )
             }

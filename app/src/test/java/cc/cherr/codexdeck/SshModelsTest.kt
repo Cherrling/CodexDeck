@@ -5,11 +5,13 @@ import cc.cherr.codexdeck.ssh.appServerCommand
 import cc.cherr.codexdeck.ssh.appServerProxyCommand
 import cc.cherr.codexdeck.ssh.jumpRoute
 import cc.cherr.codexdeck.ssh.shellQuote
+import cc.cherr.codexdeck.ssh.terminalFailureMessage
 import cc.cherr.codexdeck.ssh.validateHost
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
 
 class SshModelsTest {
     @Test
@@ -44,11 +46,13 @@ class SshModelsTest {
         )
         assertTrue(appServerCommand("/opt/codex/bin/codex").contains("exec '/opt/codex/bin/codex'"))
         assertEquals(
-            "exec 'codex' app-server proxy",
+            "exec 'codex' app-server proxy " +
+                "--sock \"\${CODEX_HOME:-\$HOME/.codex}/app-server-control/app-server-control.sock\"",
             appServerProxyCommand("codex"),
         )
         assertEquals(
-            "exec 'a'\"'\"'b' app-server proxy",
+            "exec 'a'\"'\"'b' app-server proxy " +
+                "--sock \"\${CODEX_HOME:-\$HOME/.codex}/app-server-control/app-server-control.sock\"",
             appServerProxyCommand("a'b"),
         )
     }
@@ -63,6 +67,19 @@ class SshModelsTest {
 
         host.codexExecutable = ""
         assertTrue(validateHost(host)?.contains("Codex 可执行文件") == true)
+    }
+
+    @Test
+    fun terminalFailureKeepsTheRootCauseWithoutControlCharacters() {
+        val failure = IOException(
+            "outer",
+            IllegalStateException("PTY denied\nretry later"),
+        )
+
+        assertEquals(
+            "SSH Shell 启动失败：PTY denied retry later",
+            terminalFailureMessage(failure),
+        )
     }
 
     @Test

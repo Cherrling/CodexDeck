@@ -36,6 +36,7 @@ enum class MainSection {
     SESSIONS,
     SETTINGS,
     IDENTITIES,
+    DIAGNOSTICS,
 }
 
 @Composable
@@ -93,7 +94,7 @@ fun CodexDeckApp(controller: AppController) {
                     }
                 },
                 bottomBar = {
-                    if (section != MainSection.IDENTITIES) {
+                    if (section != MainSection.IDENTITIES && section != MainSection.DIAGNOSTICS) {
                         NavigationBar {
                             MainNavigation.entries.forEach { item ->
                                 NavigationBarItem(
@@ -143,6 +144,7 @@ fun CodexDeckApp(controller: AppController) {
                             state = state,
                             controller = controller,
                             onOpenIdentities = { section = MainSection.IDENTITIES },
+                            onOpenDiagnostics = { section = MainSection.DIAGNOSTICS },
                         )
                         MainSection.IDENTITIES -> IdentitiesScreen(
                             state = state,
@@ -151,6 +153,11 @@ fun CodexDeckApp(controller: AppController) {
                             onImport = { showImportIdentity = true },
                             onGenerate = { showGenerateIdentity = true },
                             onDelete = { deletingIdentityId = it },
+                        )
+                        MainSection.DIAGNOSTICS -> DiagnosticLogScreen(
+                            state = state,
+                            controller = controller,
+                            onBack = { section = MainSection.SETTINGS },
                         )
                     }
                 }

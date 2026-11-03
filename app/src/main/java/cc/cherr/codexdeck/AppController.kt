@@ -10,6 +10,7 @@ import cc.cherr.codexdeck.data.HostDraft
 import cc.cherr.codexdeck.data.IdentityGeneration
 import cc.cherr.codexdeck.data.LocalRepository
 import cc.cherr.codexdeck.data.SettingsStore
+import cc.cherr.codexdeck.diagnostics.DiagnosticLogStore
 import cc.cherr.codexdeck.protocol.AppServerClient
 import cc.cherr.codexdeck.protocol.ApprovalKind
 import cc.cherr.codexdeck.protocol.ApprovalRequest
@@ -20,6 +21,7 @@ import cc.cherr.codexdeck.protocol.CapabilitySnapshot
 import cc.cherr.codexdeck.protocol.JsonLineTransport
 import cc.cherr.codexdeck.protocol.RequestId
 import cc.cherr.codexdeck.protocol.RpcException
+import cc.cherr.codexdeck.protocol.RpcTraceEvent
 import cc.cherr.codexdeck.protocol.ThreadItem
 import cc.cherr.codexdeck.protocol.ThreadSession
 import cc.cherr.codexdeck.protocol.ThreadSettingsSnapshot
@@ -58,6 +60,7 @@ import java.net.ConnectException
 import java.net.URI
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.io.File
 import java.security.Security
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
@@ -95,6 +98,7 @@ class AppController(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val settingsStore = SettingsStore(appContext)
+    private val diagnosticLog = DiagnosticLogStore(File(appContext.filesDir, "diagnostic.log"))
     private val local = LocalRepository(dao, vault)
     private val ssh = SshConnectionManager(dao, vault)
     private val prompts = ConnectionPromptGateway()
@@ -104,8 +108,27 @@ class AppController(
 
     private val runtimes = mutableMapOf<String, HostRuntime>()
     private var restoreAttempted = false
+    private val previousUncaughtExceptionHandler = Thread.getDefaultUncaughtExceptionHandler()
+    private val uncaughtExceptionHandler = Thread.UncaughtExceptionHandler { thread, failure ->
+        diagnosticLog.logFatal(
+            "crash",
+            "Uncaught exception thread=${thread.name} ${failure.stackTraceToString()}",
+        )
+        previousUncaughtExceptionHandler?.uncaughtException(thread, failure)
+            ?: Runtime.getRuntime().halt(10)
+    }
 
     init {
+        val savedSettings = settingsStore.read()
+        diagnosticLog.setEnabled(savedSettings.diagnosticLoggingEnabled)
+        if (savedSettings.diagnosticLoggingEnabled) {
+            diagnosticLog.log(
+                "app",
+                "diagnostic logging restored version=${BuildConfig.VERSION_NAME} " +
+                    "revision=${BuildConfig.SOURCE_REVISION}",
+            )
+        }
+        Thread.setDefaultUncaughtExceptionHandler(uncaughtExceptionHandler)
         scope.launch {
             prompts.prompts.collect { prompt ->
                 _state.update { it.copy(pendingPrompt = prompt) }
@@ -146,6 +169,7 @@ class AppController(
     fun disconnect(hostId: String? = state.value.activeHostId) {
         val targetHostId = hostId ?: return
         val runtime = runtimeFor(targetHostId)
+        diagnosticLog.log("connection", "user disconnect host=$targetHostId")
         runtime.userDisconnected = true
         val wasConnecting = runtime.connectJob?.isActive == true
         runtime.reconnectJob?.cancel()
@@ -208,6 +232,12 @@ class AppController(
     fun openTerminal(hostId: String) {
         val host = state.value.hosts.firstOrNull { it.id == hostId } ?: return showError("服务器不存在")
         scope.launch {
+            val startedAtNanos = System.nanoTime()
+            diagnosticLog.log(
+                "shell",
+                "open start host=${host.id} label=${host.label} " +
+                    "jump=${!host.jumpHostId.isNullOrBlank()}",
+            )
             _state.update { it.copy(notice = "正在为 ${host.label} 建立 SSH Shell…", error = null) }
             try {
                 val connection = ssh.connect(hostId, prompts)
@@ -218,7 +248,12 @@ class AppController(
                     transport = connection.newShellTransport(),
                     initialFontSizeSp = state.value.settings.terminalFontSizeSp,
                     onFinished = {
+                        diagnosticLog.log("shell", "closed host=${host.id} terminal=$id")
                         controller?.let { removeTerminal(id, closeController = false) }
+                    },
+                    onFailure = { message ->
+                        diagnosticLog.log("shell", "failure host=${host.id} terminal=$id $message")
+                        _state.update { it.copy(error = message, notice = null) }
                     },
                 )
                 val handle = TerminalSessionHandle(
@@ -234,8 +269,17 @@ class AppController(
                         notice = null,
                     )
                 }
+                diagnosticLog.log(
+                    "shell",
+                    "opened host=${host.id} terminal=$id durationMs=${elapsedMillis(startedAtNanos)}",
+                )
                 syncForegroundService()
             } catch (failure: Throwable) {
+                logFailure(
+                    category = "shell",
+                    context = "open host=${host.id} label=${host.label}",
+                    failure = failure,
+                )
                 _state.update { it.copy(error = friendlyError(failure), notice = null) }
                 syncForegroundService()
             }
@@ -284,6 +328,12 @@ class AppController(
             host.appServerTransport == AppServerTransportMode.SSH_EXISTING -> "SSH 已有 App Server"
             else -> "SSH 启动 App Server"
         }
+        val connectStartedAtNanos = System.nanoTime()
+        diagnosticLog.log(
+            "connection",
+            "start host=${host.id} label=${host.label} transport=$transportLabel " +
+                "reconnect=$reconnect jump=${!host.jumpHostId.isNullOrBlank()}",
+        )
         _state.update { current ->
             val shownHost = if (!reconnect ||
                 current.activeHostId == null ||
@@ -313,6 +363,12 @@ class AppController(
             val needsSsh = host.usesSshTransport()
             val sshConnection = if (needsSsh) ssh.connect(hostId, prompts) else null
             if (generationAtStart != runtime.generation.get()) return
+            if (needsSsh) {
+                diagnosticLog.log(
+                    "ssh",
+                    "authenticated host=${host.id} durationMs=${elapsedMillis(connectStartedAtNanos)}",
+                )
+            }
             val transport: JsonLineTransport = when (host.appServerTransport) {
                 AppServerTransportMode.SSH_LAUNCH -> withContext(Dispatchers.IO) {
                     requireNotNull(sshConnection).openAppServer(host.codexExecutable)
@@ -342,9 +398,15 @@ class AppController(
                 }
             }
             runtime.transport = transport
+            diagnosticLog.log(
+                "transport",
+                "opened host=${host.id} kind=${transport.javaClass.simpleName} " +
+                    "durationMs=${elapsedMillis(connectStartedAtNanos)}",
+            )
             if (transport is SshJsonLineTransport) {
                 runtime.diagnosticJob = scope.launch {
                     transport.diagnostics.collect { line ->
+                        diagnosticLog.log("ssh-diagnostic", "host=${host.id} $line")
                         if (generationAtStart == runtime.generation.get()) {
                             updateHostConnection(hostId) {
                                 it.copy(lastDiagnostic = line.take(2_000))
@@ -358,6 +420,7 @@ class AppController(
                 clientInfo = ClientInfo(
                     version = BuildConfig.VERSION_NAME,
                 ),
+                onTrace = { event -> logRpcTrace(hostId, event) },
             )
             runtime.client = client
             runtime.eventJob = scope.launch {
@@ -397,14 +460,24 @@ class AppController(
                 }
                 flushDeltas()
             }
-            client.initialize()
+            val initialized = client.initialize()
             if (generationAtStart != runtime.generation.get()) return
+            diagnosticLog.log(
+                "app-server",
+                "initialized host=${host.id} userAgent=${initialized.userAgent} " +
+                    "platform=${initialized.platformFamily}/${initialized.platformOs}",
+            )
 
             val threadPage = client.listThreadsPage(limit = 60)
             val threads = threadPage.threads
             val models = runCatching { client.listModels() }.getOrDefault(emptyList())
             val modes = runCatching { client.listCollaborationModes() }.getOrDefault(emptyList())
             val profiles = runCatching { client.listPermissionProfiles() }.getOrDefault(emptyList())
+            diagnosticLog.log(
+                "app-server",
+                "catalog host=${host.id} threads=${threads.size} models=${models.size} " +
+                    "collaborationModes=${modes.size} permissionProfiles=${profiles.size}",
+            )
             local.cacheThreads(hostId, threads)
             local.markUsed(hostId)
             val selectedModel = models.firstOrNull { it.isDefault } ?: models.firstOrNull()
@@ -439,6 +512,11 @@ class AppController(
             }
             refreshHosts()
             syncForegroundService()
+            diagnosticLog.log(
+                "connection",
+                "connected host=${host.id} transport=$transportLabel " +
+                    "durationMs=${elapsedMillis(connectStartedAtNanos)}",
+            )
             if (reopenThreadId != null && state.value.activeHostId == hostId) {
                 openThread(reopenThreadId)
             }
@@ -446,6 +524,11 @@ class AppController(
             throw cancelled
         } catch (failure: Throwable) {
             if (generationAtStart != runtime.generation.get()) return
+            logFailure(
+                category = "connection",
+                context = "host=${host.id} label=${host.label} transport=$transportLabel",
+                failure = failure,
+            )
             closeHostConnection(hostId)
             val message = friendlyError(failure)
             updateHostConnection(hostId) {
@@ -498,19 +581,38 @@ class AppController(
                     )
                 }
             }
-            is CodexEvent.TurnChanged -> updateHostConnection(hostId) { connection ->
-                connection.withThreadView(event.threadId) { view ->
-                    view.copy(
-                        turns = updateTurnStatus(view.turns, event.turnId, event.status),
-                        activeTurnId = if (event.running) event.turnId ?: view.activeTurnId else null,
-                        isTurnRunning = event.running,
-                        lastUsedAt = System.currentTimeMillis(),
-                    )
-                }.let { updated ->
-                    if (event.error != null) updated.copy(error = event.error) else updated
+            is CodexEvent.TurnChanged -> {
+                diagnosticLog.log(
+                    "turn",
+                    "changed host=$hostId thread=${event.threadId} turn=${event.turnId} " +
+                        "running=${event.running} status=${event.status} " +
+                        "error=${event.error.orEmpty()}",
+                )
+                updateHostConnection(hostId) { connection ->
+                    connection.withThreadView(event.threadId) { view ->
+                        view.copy(
+                            turns = updateTurnStatus(view.turns, event.turnId, event.status),
+                            activeTurnId = if (event.running) {
+                                event.turnId ?: view.activeTurnId
+                            } else {
+                                null
+                            },
+                            isTurnRunning = event.running,
+                            lastUsedAt = System.currentTimeMillis(),
+                        )
+                    }.let { updated ->
+                        if (event.error != null) updated.copy(error = event.error) else updated
+                    }
                 }
-            }.also { syncForegroundService() }
-            is CodexEvent.ThreadChanged -> scheduleThreadRefresh(hostId)
+                syncForegroundService()
+            }
+            is CodexEvent.ThreadChanged -> {
+                diagnosticLog.log(
+                    "thread",
+                    "changed host=$hostId thread=${event.threadId} kind=${event.kind}",
+                )
+                scheduleThreadRefresh(hostId)
+            }
             is CodexEvent.ThreadSettingsChanged -> {
                 val threadId = event.threadId ?: return
                 updateHostConnection(hostId) { current ->
@@ -535,40 +637,70 @@ class AppController(
                     )
                 }
             }
-            is CodexEvent.ApprovalRequested -> updateHostConnection(hostId) { current ->
+            is CodexEvent.ApprovalRequested -> {
                 val key = event.request.approvalKey()
-                current.copy(
-                    approvals = current.approvals.filterNot {
-                        it.approvalKey() == key
-                    } + event.request,
+                diagnosticLog.log(
+                    "approval",
+                    "requested host=$hostId method=${event.request.method} " +
+                        "kind=${event.request.kind} request=$key",
                 )
-            }
-            is CodexEvent.ApprovalResolved -> updateHostConnection(hostId) { current ->
-                val key = event.requestId.approvalKey()
-                current.copy(
-                    approvals = current.approvals.filterNot {
-                        it.requestId.approvalKey() == key
-                    },
-                    respondingApprovalIds = current.respondingApprovalIds.filterNot {
-                        it == key
-                    }.toSet(),
-                )
-            }
-            is CodexEvent.Warning -> updateHostConnection(hostId) {
-                it.copy(notice = event.message)
-            }
-            is CodexEvent.ServerError -> updateHostConnection(hostId) { current ->
-                if (event.willRetry) {
-                    current.copy(notice = "Codex 暂时错误，服务器正在重试：${event.message}")
-                } else {
-                    current.copy(error = event.message)
+                updateHostConnection(hostId) { current ->
+                    current.copy(
+                        approvals = current.approvals.filterNot {
+                            it.approvalKey() == key
+                        } + event.request,
+                    )
                 }
             }
-            is CodexEvent.Diagnostic -> updateHostConnection(hostId) {
-                it.copy(lastDiagnostic = event.message.take(2_000))
+            is CodexEvent.ApprovalResolved -> {
+                val key = event.requestId.approvalKey()
+                diagnosticLog.log(
+                    "approval",
+                    "resolved host=$hostId request=$key thread=${event.threadId}",
+                )
+                updateHostConnection(hostId) { current ->
+                    current.copy(
+                        approvals = current.approvals.filterNot {
+                            it.requestId.approvalKey() == key
+                        },
+                        respondingApprovalIds = current.respondingApprovalIds.filterNot {
+                            it == key
+                        }.toSet(),
+                    )
+                }
+            }
+            is CodexEvent.Warning -> {
+                diagnosticLog.log("server-warning", "host=$hostId ${event.message}")
+                updateHostConnection(hostId) {
+                    it.copy(notice = event.message)
+                }
+            }
+            is CodexEvent.ServerError -> {
+                diagnosticLog.log(
+                    "server-error",
+                    "host=$hostId thread=${event.threadId} code=${event.code} " +
+                        "retry=${event.willRetry} message=${event.message}",
+                )
+                updateHostConnection(hostId) { current ->
+                    if (event.willRetry) {
+                        current.copy(notice = "Codex 暂时错误，服务器正在重试：${event.message}")
+                    } else {
+                        current.copy(error = event.message)
+                    }
+                }
+            }
+            is CodexEvent.Diagnostic -> {
+                diagnosticLog.log("app-server-diagnostic", "host=$hostId ${event.message}")
+                updateHostConnection(hostId) {
+                    it.copy(lastDiagnostic = event.message.take(2_000))
+                }
             }
             is CodexEvent.Disconnected -> {
                 val runtime = runtimeFor(hostId)
+                diagnosticLog.log(
+                    "connection",
+                    "disconnected host=$hostId cause=${event.cause?.let(::throwableSummary).orEmpty()}",
+                )
                 if (!runtime.userDisconnected &&
                     state.value.connectionState(hostId).connectionPhase != ConnectionPhase.DISCONNECTED
                 ) {
@@ -662,6 +794,8 @@ class AppController(
         val client = activeClient() ?: return showError("请先连接服务器")
         if (state.value.isLoadingThread && state.value.selectedThreadId == threadId) return
         scope.launch {
+            val startedAtNanos = System.nanoTime()
+            diagnosticLog.log("thread", "resume start host=$hostId thread=$threadId")
             updateHostConnection(hostId) { current ->
                 val now = System.currentTimeMillis()
                 val previous = current.activeThreadView()?.copy(lastUsedAt = now)
@@ -725,7 +859,17 @@ class AppController(
                 if (state.value.activeHostId == hostId) {
                     settingsStore.rememberConnection(hostId, threadId)
                 }
+                diagnosticLog.log(
+                    "thread",
+                    "resume complete host=$hostId thread=$threadId turns=${page.turns.size} " +
+                        "durationMs=${elapsedMillis(startedAtNanos)}",
+                )
             } catch (failure: Throwable) {
+                logFailure(
+                    category = "thread",
+                    context = "resume host=$hostId thread=$threadId",
+                    failure = failure,
+                )
                 updateHostConnection(hostId) {
                     if (it.selectedThreadId == threadId) {
                         it.copy(isLoadingThread = false, error = friendlyError(failure))
@@ -771,6 +915,7 @@ class AppController(
         val cursor = stateBefore.olderHistoryCursor ?: return
         if (stateBefore.isLoadingHistory) return
         scope.launch {
+            val startedAtNanos = System.nanoTime()
             updateHostConnection(hostId) { it.copy(isLoadingHistory = true) }
             try {
                 val page = client.listTurns(threadId, cursor = cursor, limit = 20, sortDirection = "desc")
@@ -790,7 +935,17 @@ class AppController(
                     )
                 }
                 syncForegroundService()
+                diagnosticLog.log(
+                    "history",
+                    "loaded host=$hostId thread=$threadId turns=${page.turns.size} " +
+                        "durationMs=${elapsedMillis(startedAtNanos)}",
+                )
             } catch (failure: Throwable) {
+                logFailure(
+                    category = "history",
+                    context = "load host=$hostId thread=$threadId",
+                    failure = failure,
+                )
                 updateHostConnection(hostId) {
                     it.copy(isLoadingHistory = false, error = friendlyError(failure))
                 }
@@ -842,7 +997,16 @@ class AppController(
                     ).withSelectedSession(session)
                 }
                 _state.update { it.copy(busy = false) }
+                diagnosticLog.log(
+                    "thread",
+                    "created host=$hostId thread=${session.thread.id}",
+                )
             } catch (failure: Throwable) {
+                logFailure(
+                    category = "thread",
+                    context = "create host=$hostId",
+                    failure = failure,
+                )
                 _state.update { it.copy(busy = false) }
                 updateHostConnection(hostId) { it.copy(error = friendlyError(failure)) }
             }
@@ -866,10 +1030,20 @@ class AppController(
         val session = current.selectedSession ?: return showError("会话尚未恢复")
         if (!claimSending(threadId)) return
         scope.launch {
+            val snapshot = state.value.connectionState(hostId)
+            val activeTurnId = snapshot.activeTurnId
+            val steering = snapshot.isTurnRunning && !activeTurnId.isNullOrBlank()
+            diagnosticLog.log(
+                "turn",
+                if (steering) {
+                    "steer request host=$hostId thread=$threadId turn=$activeTurnId"
+                } else {
+                    "start request host=$hostId thread=$threadId images=${imageDataUrls.size}"
+                },
+            )
             try {
-                val snapshot = state.value.connectionState(hostId)
-                if (snapshot.isTurnRunning && !snapshot.activeTurnId.isNullOrBlank()) {
-                    client.steerTurn(threadId, snapshot.activeTurnId, body, imageDataUrls)
+                if (steering) {
+                    client.steerTurn(threadId, requireNotNull(activeTurnId), body, imageDataUrls)
                 } else {
                     val turn = client.startTurn(
                         threadId = threadId,
@@ -907,7 +1081,24 @@ class AppController(
                         },
                     )
                 }
+                diagnosticLog.log(
+                    "turn",
+                    if (steering) {
+                        "steer accepted host=$hostId thread=$threadId"
+                    } else {
+                        "start accepted host=$hostId thread=$threadId"
+                    },
+                )
             } catch (failure: Throwable) {
+                logFailure(
+                    category = "turn",
+                    context = if (steering) {
+                        "steer host=$hostId thread=$threadId"
+                    } else {
+                        "start host=$hostId thread=$threadId"
+                    },
+                    failure = failure,
+                )
                 updateHostConnection(hostId) {
                     it.copy(isSending = false, error = friendlyError(failure))
                 }
@@ -1072,7 +1263,16 @@ class AppController(
             try {
                 client.approve(request, decision, answers)
                 removeApproval(hostId, request)
+                diagnosticLog.log(
+                    "approval",
+                    "responded host=$hostId request=$key method=${request.method} decision=$decision",
+                )
             } catch (failure: Throwable) {
+                logFailure(
+                    category = "approval",
+                    context = "respond host=$hostId request=$key method=${request.method}",
+                    failure = failure,
+                )
                 updateHostConnection(hostId) {
                     it.copy(respondingApprovalIds = it.respondingApprovalIds - key)
                 }
@@ -1097,7 +1297,16 @@ class AppController(
                     client.approve(request, decision = "decline")
                 }
                 removeApproval(hostId, request)
+                diagnosticLog.log(
+                    "approval",
+                    "declined host=$hostId request=$key method=${request.method}",
+                )
             } catch (failure: Throwable) {
+                logFailure(
+                    category = "approval",
+                    context = "reject host=$hostId request=$key method=${request.method}",
+                    failure = failure,
+                )
                 updateHostConnection(hostId) {
                     it.copy(respondingApprovalIds = it.respondingApprovalIds - key)
                 }
@@ -1334,8 +1543,23 @@ class AppController(
     }
 
     fun updateSettings(settings: AppSettings) {
+        val previous = state.value.settings
         settingsStore.write(settings)
+        diagnosticLog.setEnabled(settings.diagnosticLoggingEnabled)
+        if (!previous.diagnosticLoggingEnabled && settings.diagnosticLoggingEnabled) {
+            diagnosticLog.log(
+                "settings",
+                "diagnostic logging enabled version=${BuildConfig.VERSION_NAME} " +
+                    "revision=${BuildConfig.SOURCE_REVISION}",
+            )
+        }
         _state.update { it.copy(settings = settings) }
+    }
+
+    suspend fun readDiagnosticLog(): String = diagnosticLog.read()
+
+    suspend fun clearDiagnosticLog() {
+        diagnosticLog.clear()
     }
 
     fun setThreadSearch(value: String) {
@@ -1476,6 +1700,7 @@ class AppController(
         if (hostId.isNullOrBlank()) return
         val runtime = runtimeFor(hostId)
         if (runtime.userDisconnected || runtime.reconnectJob?.isActive == true) return
+        diagnosticLog.log("connection", "reconnect scheduled host=$hostId attempts=3")
         runtime.reconnectJob = scope.launch {
             val selectedThread = state.value.connectionState(hostId).selectedThreadId
             val delays = longArrayOf(2_000, 5_000, 10_000)
@@ -1489,6 +1714,10 @@ class AppController(
                 syncForegroundService()
                 delay(waitMs)
                 try {
+                    diagnosticLog.log(
+                        "connection",
+                        "reconnect attempt host=$hostId attempt=${index + 1}",
+                    )
                     connectInternal(hostId, reconnect = true, reopenThreadId = selectedThread)
                     if (state.value.connectionState(hostId).connectionPhase ==
                         ConnectionPhase.CONNECTED
@@ -1505,6 +1734,7 @@ class AppController(
                     connectionMessage = "无法恢复连接；Agent 的实际状态需要在服务器上确认",
                 )
             }
+            diagnosticLog.log("connection", "reconnect exhausted host=$hostId")
             syncForegroundService()
         }
     }
@@ -1624,6 +1854,53 @@ class AppController(
         }
     }
 
+    private fun logRpcTrace(hostId: String, event: RpcTraceEvent) {
+        val details = buildString {
+            append("host=")
+            append(hostId)
+            append(" phase=")
+            append(event.phase)
+            append(" method=")
+            append(event.method)
+            event.requestId?.let {
+                append(" request=")
+                append(it)
+            }
+            event.durationMs?.let {
+                append(" durationMs=")
+                append(it)
+            }
+            event.errorCode?.let {
+                append(" errorCode=")
+                append(it)
+            }
+            event.errorMessage?.takeIf(String::isNotBlank)?.let {
+                append(" error=")
+                append(it)
+            }
+        }
+        diagnosticLog.log("rpc", details)
+    }
+
+    private fun logFailure(category: String, context: String, failure: Throwable) {
+        diagnosticLog.log(category, "$context failure=${throwableSummary(failure)}")
+    }
+
+    private fun throwableSummary(failure: Throwable): String =
+        generateSequence(failure) { it.cause }
+            .take(8)
+            .joinToString(" <- ") { error ->
+                buildString {
+                    append(error.javaClass.simpleName)
+                    (error as? RpcException)?.code?.let {
+                        append(" code=")
+                        append(it)
+                    }
+                    append(": ")
+                    append(error.message.orEmpty().ifBlank { "(no message)" })
+                }
+            }
+
     private fun friendlyError(failure: Throwable): String {
         var current: Throwable? = failure
         while (current != null) {
@@ -1670,6 +1947,10 @@ class AppController(
             terminals.forEach { runCatching { it.controller.close() } }
             sshConnections.forEach { runCatching { it.close() } }
         }
+        if (Thread.getDefaultUncaughtExceptionHandler() === uncaughtExceptionHandler) {
+            Thread.setDefaultUncaughtExceptionHandler(previousUncaughtExceptionHandler)
+        }
+        diagnosticLog.close()
         scope.cancel()
         ssh.close()
         prompts.cancelAll()
@@ -1724,6 +2005,9 @@ class AppController(
         ConnectionForegroundService.start(appContext, title, detail)
     }
 }
+
+private fun elapsedMillis(startedAtNanos: Long): Long =
+    ((System.nanoTime() - startedAtNanos) / 1_000_000L).coerceAtLeast(0L)
 
 internal fun RequestId.approvalKey(): String = when (this) {
     is RequestId.Number -> "Number:$value"

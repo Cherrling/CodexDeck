@@ -38,7 +38,7 @@ JSON-RPC-like.
 The preferred “existing App Server” Host runs:
 
 ```text
-exec '<codex>' app-server proxy
+exec '<codex>' app-server proxy --sock "${CODEX_HOME:-$HOME/.codex}/app-server-control/app-server-control.sock"
 ```
 
 `proxy` transparently bridges these JSONL bytes to the running local Unix control
@@ -143,6 +143,13 @@ handling or every typed approval form is complete.
 - In particular, CodexDeck must not re-send `turn/start` after reconnect or timeout.
 - A reconnect resynchronizes authoritative state through `thread/resume` and
   `thread/turns/list`.
+
+Optional diagnostics trace only RPC metadata: method, request ID, completion/failure,
+duration, error code, and error message. The trace callback has no request/response body
+fields. This makes timeouts and errors such as `Thread ... already has an active writer`
+diagnosable without persisting chat input, tool output, authorization headers, or image
+data. Server-initiated request methods are traced for approval troubleshooting; their
+params and the user's decision payload are not sent to the trace log.
 
 ## Implemented client methods
 

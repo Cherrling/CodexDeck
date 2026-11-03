@@ -33,6 +33,7 @@ two recorded Codex revisions.
 :app
   ui/                 Compose screens, dialogs, navigation
   AppController.kt    Process-scoped orchestration and UI state
+  diagnostics/        Opt-in bounded local diagnostic log and redaction
   transport/          OkHttp WebSocket JSON transport
   ssh/                Host trust, authentication, routes, exec, PTY, forwarding
   terminal/           Termux emulator adapter and Android View lifecycle
@@ -133,7 +134,7 @@ channels and clients.
 The preferred SSH mode executes:
 
 ```text
-exec '<configured path>' app-server proxy
+exec '<configured path>' app-server proxy --sock "${CODEX_HOME:-$HOME/.codex}/app-server-control/app-server-control.sock"
 ```
 
 `proxy` is a byte bridge over stdin/stdout to the already-running local app-server
@@ -238,6 +239,34 @@ Thread's visible timeline.
   per send.
 - SSH stdout uses a 256-message bounded queue and a 16 MiB line limit. WebSocket uses a
   512-message bounded queue and a 16 MiB text-frame limit; overflow closes the transport.
+
+## Diagnostic logging
+
+Diagnostic logging is opt-in through `AppSettings.diagnosticLoggingEnabled` and is off by
+default. `DiagnosticLogStore` checks the enabled flag before formatting or enqueueing an
+entry, and rechecks it in the single writer when consuming the bounded queue. Turning the
+setting off therefore drops queued entries and stops further disk writes immediately;
+previously written logs remain until the user clears them.
+
+The log sink lives in the app-private files directory. It keeps approximately 256 KiB or
+2,000 lines, whichever is reached first, and compacts to older-line eviction in the
+background. The UI can refresh, select, copy, share, and clear the text.
+
+Instrumentation is metadata-only:
+
+- connection/SSH/transport phases and durations;
+- SSH stderr and terminal startup failures;
+- app-server initialization version/platform;
+- JSON-RPC method, request ID, outcome, duration, and error code/message;
+- Thread/Turn/approval lifecycle and reconnect state;
+- uncaught exception thread and sanitized stack trace, written synchronously before the
+  existing Android crash handler runs.
+
+`RpcTraceEvent` has no request/response body field. Chat text, terminal output, JSON-RPC
+params/results, image data, passwords, private keys, and capability tokens are excluded
+at the instrumentation boundary. A defense-in-depth sanitizer also redacts private-key
+blocks, Bearer/authorization values, credential-shaped fields, URI user-info, and long
+base64-like secrets from third-party stderr before writing.
 
 ## Lifecycle and background behavior
 

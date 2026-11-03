@@ -13,6 +13,7 @@ data class AppSettings(
     val theme: ThemeMode = ThemeMode.DARK,
     val dynamicColor: Boolean = true,
     val autoReconnectOnLaunch: Boolean = false,
+    val diagnosticLoggingEnabled: Boolean = false,
     val terminalFontSizeSp: Int = 13,
     val keepScreenOnInTerminal: Boolean = false,
 )
@@ -26,6 +27,7 @@ class SettingsStore(context: Context) {
         } ?: ThemeMode.DARK,
         dynamicColor = preferences.getBoolean("dynamic_color", true),
         autoReconnectOnLaunch = preferences.getBoolean("auto_reconnect_on_launch", false),
+        diagnosticLoggingEnabled = preferences.getBoolean("diagnostic_logging_enabled", false),
         terminalFontSizeSp = preferences.getInt("terminal_font_size", 13).coerceIn(9, 28),
         keepScreenOnInTerminal = preferences.getBoolean("keep_screen_on_terminal", false),
     )
@@ -35,6 +37,7 @@ class SettingsStore(context: Context) {
             putString("theme", settings.theme.name)
             putBoolean("dynamic_color", settings.dynamicColor)
             putBoolean("auto_reconnect_on_launch", settings.autoReconnectOnLaunch)
+            putBoolean("diagnostic_logging_enabled", settings.diagnosticLoggingEnabled)
             putInt("terminal_font_size", settings.terminalFontSizeSp.coerceIn(9, 28))
             putBoolean("keep_screen_on_terminal", settings.keepScreenOnInTerminal)
         }

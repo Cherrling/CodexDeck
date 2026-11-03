@@ -10,4 +10,10 @@ class AppSettingsTest {
         assertFalse(AppSettings().autoReconnectOnLaunch)
         assertTrue(AppSettings(autoReconnectOnLaunch = true).autoReconnectOnLaunch)
     }
+
+    @Test
+    fun diagnosticLoggingIsOptIn() {
+        assertFalse(AppSettings().diagnosticLoggingEnabled)
+        assertTrue(AppSettings(diagnosticLoggingEnabled = true).diagnosticLoggingEnabled)
+    }
 }

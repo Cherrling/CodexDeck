@@ -13,6 +13,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -30,6 +31,7 @@ fun SettingsScreen(
     state: AppState,
     controller: AppController,
     onOpenIdentities: () -> Unit,
+    onOpenDiagnostics: () -> Unit,
 ) {
     val settings = state.settings
     Column(
@@ -111,6 +113,20 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.bodyMedium,
             )
             Button(onClick = onOpenIdentities) { Text("管理 SSH 身份") }
+        }
+
+        SettingsCard("诊断日志") {
+            SettingSwitch(
+                title = "启用诊断日志",
+                detail = "默认关闭。开启后记录连接阶段、SSH stderr、Shell 失败、App Server 初始化和 RPC 方法/错误；不记录聊天正文、终端输出、请求参数、私钥或密码。",
+                checked = settings.diagnosticLoggingEnabled,
+                onCheckedChange = {
+                    controller.updateSettings(settings.copy(diagnosticLoggingEnabled = it))
+                },
+            )
+            OutlinedButton(onClick = onOpenDiagnostics) {
+                Text("查看、复制或分享日志")
+            }
         }
 
         SettingsCard("关于 CodexDeck") {

@@ -199,5 +199,6 @@ internal fun appServerCommand(executable: String): String {
 
 internal fun appServerProxyCommand(executable: String): String {
     require(executable.isNotBlank() && executable.none(Char::isISOControl))
-    return "exec ${shellQuote(executable)} app-server proxy"
+    return "exec ${shellQuote(executable)} app-server proxy " +
+        "--sock \"\${CODEX_HOME:-\$HOME/.codex}/app-server-control/app-server-control.sock\""
 }

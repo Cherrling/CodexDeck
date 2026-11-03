@@ -44,6 +44,8 @@ published `SHA256SUMS`.
   degradation when a server method is unavailable.
 - Interactive PTY shell with an upstream Termux emulator, TrueColor, resize, clipboard,
   Ctrl/Alt modifiers, multiple sessions, and a foreground connection service.
+- Opt-in on-device diagnostic logs with immediate disable, bounded rotation, redaction,
+  in-app viewing, copy/share, and clear actions.
 - Eight-session LRU UI cache, 120-Turn retention bound, bounded tool output, and
   coalesced streaming updates. Protocol queues and individual messages are bounded.
 
@@ -68,7 +70,8 @@ already-running local app-server control socket. CodexDeck uses this mode by def
 new SSH Hosts:
 
 ```text
-exec '<codex executable>' app-server proxy
+exec '<codex executable>' app-server proxy \
+  --sock "${CODEX_HOME:-$HOME/.codex}/app-server-control/app-server-control.sock"
 ```
 
 This does not start another runtime. The phone and a PC TUI can attach to the same
@@ -183,6 +186,26 @@ Android network interruption are distinct failure modes.
 The default debug package is `cc.cherr.codexdeck.debug`. A release-signed package uses
 `cc.cherr.codexdeck`.
 
+## Diagnostic logs
+
+Diagnostic logging is off by default and can be enabled in **设置 → 诊断日志**. While it
+is off, the app does not format, queue, or write diagnostic entries. Existing entries are
+retained until the user clears them.
+
+When enabled, CodexDeck records connection phases and durations, SSH proxy stderr, Shell
+startup failures, app-server initialization metadata, JSON-RPC methods, request outcomes,
+error codes/messages, approval lifecycle, Turn lifecycle, reconnects, and disconnects.
+When enabled, a global uncaught-exception handler also writes the crashing thread and stack
+trace synchronously before delegating to Android's existing handler.
+It does not record chat messages, terminal output, JSON-RPC request/response bodies,
+private keys, passwords, Bearer tokens, or app-server capability tokens. Best-effort
+redaction is also applied to third-party stderr before it reaches the file.
+
+The log is stored only in the app's private files directory. It is capped at approximately
+256 KiB and 2,000 lines, compacts in the background, and provides in-app refresh, text
+selection, copy, system share, and clear actions. Share the log only after reviewing it;
+host names and filesystem paths may still be operationally sensitive.
+
 ## Security model
 
 - Private keys, SSH passwords, and app-server Bearer tokens are never placed in Room as
@@ -190,8 +213,10 @@ The default debug package is `cc.cherr.codexdeck.debug`. A release-signed packag
   authenticated data binds each ciphertext to its Host/Identity context.
 - Android Keystore protects the local encryption key, not arbitrary OpenSSH/PEM/private
   key formats directly. Imported private-key bytes are encrypted with that vault key.
-- No credential is sent to logs. App-server stderr is delivered separately and is never
-  mixed into JSON-RPC.
+- Diagnostic logging is opt-in. Credential-shaped values and private-key blocks are
+  redacted, while protocol payloads, chat text, and terminal output are excluded at the
+  instrumentation boundary. App-server stderr is delivered separately and is never mixed
+  into JSON-RPC.
 - Known Host Key changes are rejected. There is no global “accept any host key” mode.
 - `ws://` is accepted only for loopback, SSH-tunneled loopback, or after an explicit
   per-Host cleartext opt-in. `wss://` uses Android/platform TLS verification.
