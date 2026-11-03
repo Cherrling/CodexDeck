@@ -104,7 +104,7 @@ Researched revisions:
 | Code Review | Partial | Inline uncommitted-change review is implemented; other review targets need dedicated UI. |
 | Skills / MCP / Plugins inventory | Implemented | Read-only server-provided catalogs with per-capability degradation. |
 | MCP OAuth, plugin install/remove, typed MCP app/resource UI | Not implemented | Read-only inventory only; no fake mutation controls. |
-| Markdown | Partial | Paragraphs and fenced code; no full CommonMark tables, images, links, or syntax highlighting yet. |
+| Markdown | Implemented, device-unverified | Asynchronous GitHub-Flavored Markdown through `multiplatform-markdown-renderer-m3`: headings, lists, emphasis, links, tables, block quotes, task lists, inline code, and fenced code. Remote images and syntax highlighting remain disabled. |
 
 ## Interactive Shell
 

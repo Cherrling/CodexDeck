@@ -147,6 +147,7 @@ dependencies {
     annotationProcessor(libs.androidx.room.compiler)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.compose.markdown.m3)
 
     implementation(libs.sshj)
     implementation(libs.bcprov)

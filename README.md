@@ -36,9 +36,10 @@ published `SHA256SUMS`.
   catalogs, approvals, and running-Turn state; switch Hosts without disconnecting others.
 - Collapsible project groups derived from each Server's remote `cwd`, with per-Server
   collapse state and one-tap Thread opening.
-- Streaming Agent/Reasoning/Plan/command events, Markdown/code fences, command output,
-  file changes/aggregate Turn diffs, tool calls, collaboration/Subagent state, and
-  approvals that disappear when another connected client resolves them.
+- Streaming Agent/Reasoning/Plan/command events, native GFM Markdown (headings, lists,
+  emphasis, links, tables, inline code, and fenced code), command output, file
+  changes/aggregate Turn diffs, tool calls, collaboration/Subagent state, and approvals
+  that disappear when another connected client resolves them.
 - Command execution cards are collapsed by default to one command/status row; full
   command and output content is composed only after the user taps to expand.
 - Model, Reasoning Effort, Approval Policy, one effective permission selector
@@ -361,8 +362,8 @@ loses non-exported local state.
   one uninstall when moving from that first build. Release signing avoids this fallback.
 - MCP, Skills, and Plugins are currently inventory views. MCP OAuth, plugin
   install/remove, Skills configuration, and rich app/resource UIs are not complete.
-- Markdown rendering handles paragraphs and fenced code but does not yet provide full
-  CommonMark tables/images/links or syntax highlighting.
+- Markdown uses a GFM parser and native Compose layout. Remote images and syntax
+  highlighting are not enabled yet.
 - A different app-server process does not share live Turn execution. PC and Android can
   observe the same active Thread only when connected to the same app-server process.
 

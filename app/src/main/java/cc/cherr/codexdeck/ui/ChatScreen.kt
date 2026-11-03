@@ -80,6 +80,10 @@ import cc.cherr.codexdeck.protocol.ApprovalKind
 import cc.cherr.codexdeck.protocol.ApprovalRequest
 import cc.cherr.codexdeck.protocol.ThreadItem
 import cc.cherr.codexdeck.protocol.ThreadTurn
+import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
+import com.mikepenz.markdown.model.rememberMarkdownState
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -1037,21 +1041,42 @@ private fun CodeBlock(text: String) {
 
 @Composable
 private fun MarkdownContent(text: String, modifier: Modifier = Modifier) {
-    val parts = remember(text) { splitFences(text) }
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        parts.forEach { part ->
-            if (part.isCode) {
-                CodeBlock(part.text)
-            } else if (part.text.isNotBlank()) {
-                SelectionContainer {
-                    Text(part.text, style = MaterialTheme.typography.bodyLarge)
-                }
-            }
-        }
+    val markdownState = rememberMarkdownState(
+        content = text,
+        retainState = true,
+    )
+    SelectionContainer {
+        Markdown(
+            markdownState = markdownState,
+            modifier = modifier.fillMaxWidth(),
+            colors = markdownColor(
+                text = MaterialTheme.colorScheme.onSurface,
+                codeBackground = MaterialTheme.colorScheme.surfaceContainerHighest,
+                inlineCodeBackground = MaterialTheme.colorScheme.surfaceContainerHighest,
+                dividerColor = MaterialTheme.colorScheme.outlineVariant,
+                tableBackground = MaterialTheme.colorScheme.surfaceContainer,
+            ),
+            typography = markdownTypography(
+                h1 = MaterialTheme.typography.headlineLarge,
+                h2 = MaterialTheme.typography.headlineMedium,
+                h3 = MaterialTheme.typography.headlineSmall,
+                h4 = MaterialTheme.typography.titleLarge,
+                h5 = MaterialTheme.typography.titleMedium,
+                h6 = MaterialTheme.typography.titleSmall,
+                text = MaterialTheme.typography.bodyLarge,
+                code = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                inlineCode = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                quote = MaterialTheme.typography.bodyLarge,
+                paragraph = MaterialTheme.typography.bodyLarge,
+                ordered = MaterialTheme.typography.bodyLarge,
+                bullet = MaterialTheme.typography.bodyLarge,
+                list = MaterialTheme.typography.bodyLarge,
+                table = MaterialTheme.typography.bodyMedium,
+            ),
+        )
     }
 }
 
-private data class MarkdownPart(val text: String, val isCode: Boolean)
 private data class SelectedImage(val name: String, val dataUrl: String)
 
 private fun readImageAttachment(context: Context, uri: Uri): SelectedImage {
@@ -1093,28 +1118,6 @@ private fun readImageAttachment(context: Context, uri: Uri): SelectedImage {
         buffer.fill(0)
         bytes.reset()
     }
-}
-
-private fun splitFences(text: String): List<MarkdownPart> {
-    val parts = mutableListOf<MarkdownPart>()
-    var cursor = 0
-    while (cursor < text.length) {
-        val start = text.indexOf("```", cursor)
-        if (start < 0) {
-            parts += MarkdownPart(text.substring(cursor), false)
-            break
-        }
-        if (start > cursor) parts += MarkdownPart(text.substring(cursor, start), false)
-        val contentStart = text.indexOf('\n', start + 3).let { if (it < 0) text.length else it + 1 }
-        val end = text.indexOf("```", contentStart)
-        if (end < 0) {
-            parts += MarkdownPart(text.substring(contentStart), true)
-            break
-        }
-        parts += MarkdownPart(text.substring(contentStart, end).trimEnd(), true)
-        cursor = end + 3
-    }
-    return parts
 }
 
 @Composable
