@@ -478,7 +478,7 @@ class AppController(
             )
 
             val threadPage = client.listThreadsPage(limit = 60)
-            val threads = threadPage.threads
+            val threads = userVisibleThreads(threadPage.threads)
             val models = runCatching { client.listModels() }.getOrDefault(emptyList())
             val modes = runCatching { client.listCollaborationModes() }.getOrDefault(emptyList())
             val profiles = runCatching { client.listPermissionProfiles() }.getOrDefault(emptyList())
@@ -487,6 +487,13 @@ class AppController(
                 "catalog host=${host.id} threads=${threads.size} models=${models.size} " +
                     "collaborationModes=${modes.size} permissionProfiles=${profiles.size}",
             )
+            if (threads.size != threadPage.threads.size) {
+                diagnosticLog.log(
+                    "thread",
+                    "normalized list host=${host.id} raw=${threadPage.threads.size} " +
+                        "visible=${threads.size}",
+                )
+            }
             local.cacheThreads(hostId, threads)
             local.markUsed(hostId)
             val selectedModel = models.firstOrNull { it.isDefault } ?: models.firstOrNull()
@@ -1698,6 +1705,7 @@ class AppController(
                     cursor = cursor,
                     limit = 60,
                 )
+                val pageThreads = userVisibleThreads(page.threads)
                 val latest = state.value.connectionState(hostId)
                 if (latest.threadSearch != snapshot.threadSearch ||
                     latest.showArchivedThreads != snapshot.showArchivedThreads
@@ -1705,16 +1713,14 @@ class AppController(
                     return@launch
                 }
                 if (!snapshot.showArchivedThreads && snapshot.threadSearch.isBlank()) {
-                    local.cacheThreads(hostId, page.threads)
+                    local.cacheThreads(hostId, pageThreads)
                 }
                 updateHostConnection(hostId) { state ->
-                    val byId = page.threads.associateBy(CodexThread::id)
+                    val byId = pageThreads.associateBy(CodexThread::id)
                     val threads = if (reset) {
-                        page.threads
+                        pageThreads
                     } else {
-                        (state.threads + page.threads)
-                            .associateBy(CodexThread::id)
-                            .values
+                        userVisibleThreads(state.threads + pageThreads)
                             .sortedByDescending(CodexThread::updatedAt)
                     }
                     val threadViews = state.threadViews.mapValues { (_, view) ->

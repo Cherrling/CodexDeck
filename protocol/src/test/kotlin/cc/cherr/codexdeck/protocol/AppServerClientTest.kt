@@ -86,6 +86,90 @@ class AppServerClientTest {
     }
 
     @Test
+    fun threadListPageDeduplicatesRepeatedIdsAndKeepsActiveRuntime() = runTest {
+        val transport = FakeTransport()
+        val client = AppServerClient(
+            transport = transport,
+            clientInfo = ClientInfo(version = "test"),
+            scope = this,
+        )
+        val initialize = async { client.initialize() }
+        transport.emit(ok(transport.receiveRequest().id, buildJsonObject {}))
+        initialize.await()
+        transport.receiveNotification()
+
+        val page = async { client.listThreadsPage(limit = 60) }
+        val request = transport.receiveRequest()
+        transport.emit(
+            ok(
+                request.id,
+                buildJsonObject {
+                    put("data", buildJsonArray {
+                        add(threadJson("thread-1", "Newer metadata", status = "idle", updatedAt = 20))
+                        add(threadJson("thread-1", "Older active", status = "active", updatedAt = 10))
+                        add(threadJson("thread-1", "Newest metadata", status = "idle", updatedAt = 30))
+                    })
+                    put("nextCursor", kotlinx.serialization.json.JsonNull)
+                },
+            ),
+        )
+
+        val visible = page.await().threads
+        assertEquals(1, visible.size)
+        assertEquals("Newest metadata", visible.single().title)
+        assertEquals("active", visible.single().status.type)
+        client.close()
+    }
+
+    @Test
+    fun threadListPageReadsUserVisibilityMetadata() = runTest {
+        val transport = FakeTransport()
+        val client = AppServerClient(
+            transport = transport,
+            clientInfo = ClientInfo(version = "test"),
+            scope = this,
+        )
+        val initialize = async { client.initialize() }
+        transport.emit(ok(transport.receiveRequest().id, buildJsonObject {}))
+        initialize.await()
+        transport.receiveNotification()
+
+        val page = async { client.listThreadsPage(limit = 60) }
+        val request = transport.receiveRequest()
+        transport.emit(
+            ok(
+                request.id,
+                buildJsonObject {
+                    put("data", buildJsonArray {
+                        add(
+                            threadJson(
+                                id = "user",
+                                title = "User",
+                                threadSource = "user",
+                            ),
+                        )
+                        add(
+                            threadJson(
+                                id = "agent",
+                                title = "Agent",
+                                threadSource = "subagent",
+                                agentNickname = "worker",
+                                agentRole = "reviewer",
+                            ),
+                        )
+                    })
+                    put("nextCursor", kotlinx.serialization.json.JsonNull)
+                },
+            ),
+        )
+
+        val threads = page.await().threads
+        assertTrue(threads.single { it.id == "user" }.isUserVisible)
+        assertFalse(threads.single { it.id == "agent" }.isUserVisible)
+        client.close()
+    }
+
+    @Test
     fun approvalResponseEchoesServerRequestIdAndDecision() = runTest {
         val transport = FakeTransport()
         val client = AppServerClient(
@@ -474,16 +558,27 @@ class AppServerClientTest {
         client.close()
     }
 
-    private fun threadJson(id: String, title: String): JsonObject = buildJsonObject {
+    private fun threadJson(
+        id: String,
+        title: String,
+        status: String = "idle",
+        updatedAt: Long = 2,
+        threadSource: String? = null,
+        agentNickname: String? = null,
+        agentRole: String? = null,
+    ): JsonObject = buildJsonObject {
         put("id", id)
         put("sessionId", id)
         put("name", title)
         put("preview", "$title preview")
         put("cwd", "/repo")
         put("createdAt", 1)
-        put("updatedAt", 2)
-        put("status", buildJsonObject { put("type", "idle") })
+        put("updatedAt", updatedAt)
+        put("status", buildJsonObject { put("type", status) })
         put("ephemeral", false)
+        threadSource?.let { put("threadSource", it) }
+        agentNickname?.let { put("agentNickname", it) }
+        agentRole?.let { put("agentRole", it) }
     }
 
     private fun itemEntry(id: String): JsonObject = buildJsonObject {

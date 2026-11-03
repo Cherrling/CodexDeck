@@ -11,6 +11,7 @@ import cc.cherr.codexdeck.protocol.ModelInfo
 import cc.cherr.codexdeck.protocol.PermissionProfile
 import cc.cherr.codexdeck.protocol.ThreadSession
 import cc.cherr.codexdeck.protocol.ThreadTurn
+import cc.cherr.codexdeck.protocol.deduplicateThreads
 import cc.cherr.codexdeck.ssh.ConnectionPrompt
 import cc.cherr.codexdeck.terminal.ShellTerminalController
 import kotlinx.serialization.json.JsonElement
@@ -321,7 +322,7 @@ data class ThreadProject(
 )
 
 fun groupThreads(threads: List<CodexThread>): List<ThreadProject> =
-    threads.groupBy { normalizeRemoteProjectPath(it.cwd) }
+    userVisibleThreads(threads).groupBy { normalizeRemoteProjectPath(it.cwd) }
         .map { (path, items) ->
             ThreadProject(
                 path = path,
@@ -333,6 +334,9 @@ fun groupThreads(threads: List<CodexThread>): List<ThreadProject> =
             )
         }
         .sortedByDescending { project -> project.threads.maxOfOrNull { it.updatedAt } ?: 0 }
+
+internal fun userVisibleThreads(threads: List<CodexThread>): List<CodexThread> =
+    deduplicateThreads(threads).filter(CodexThread::isUserVisible)
 
 internal fun normalizeRemoteProjectPath(path: String): String {
     val trimmed = path.trim()

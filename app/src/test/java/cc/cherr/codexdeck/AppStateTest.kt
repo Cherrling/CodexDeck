@@ -48,6 +48,46 @@ class AppStateTest {
     }
 
     @Test
+    fun userThreadListMergesDuplicateIdsAndHidesSubagents() {
+        val olderActive = thread("thread-1", "/srv/api", 10).copy(
+            title = "Older title",
+            status = ThreadRuntimeStatus("active"),
+        )
+        val newerSnapshot = thread("thread-1", "/srv/api", 20).copy(title = "Newest title")
+        val childThread = thread("child", "/srv/api", 30).copy(
+            parentThreadId = "thread-1",
+            sourceKind = "subAgent",
+        )
+        val sourceOnlyChild = thread("child-2", "/srv/api", 40).copy(sourceKind = "subAgent")
+        val namedChild = thread("child-3", "/srv/api", 50).copy(
+            threadSource = "subagent",
+            agentNickname = "worker",
+        )
+        val guardianThread = thread("guardian", "/srv/api", 60).copy(
+            threadSource = "guardianReview",
+        )
+        val userFeatureOptIn = thread("user-feature", "/srv/api", 70).copy(
+            threadSource = "user",
+        )
+
+        val visible = userVisibleThreads(
+            listOf(
+                olderActive,
+                newerSnapshot,
+                childThread,
+                sourceOnlyChild,
+                namedChild,
+                guardianThread,
+                userFeatureOptIn,
+            ),
+        )
+
+        assertEquals(listOf("thread-1", "user-feature"), visible.map(CodexThread::id))
+        assertEquals("Newest title", visible.first().title)
+        assertEquals("active", visible.first().status.type)
+    }
+
+    @Test
     fun threadViewCacheEvictsLeastRecentlyUsedInactiveSessions() {
         val views = (1..10).associate { index ->
             val id = "thread-$index"

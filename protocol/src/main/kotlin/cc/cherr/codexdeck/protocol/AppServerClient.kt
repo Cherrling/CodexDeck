@@ -103,7 +103,11 @@ class AppServerClient(
                 cursor = cursor,
                 limit = 100,
             )
-            page.threads.forEach { threads[it.id] = it }
+            page.threads.forEach { thread ->
+                val current = threads[thread.id]
+                threads[thread.id] = current?.let { deduplicateThreads(listOf(it, thread)).single() }
+                    ?: thread
+            }
             cursor = page.nextCursor
             if (cursor != null && !cursors.add(cursor)) {
                 throw RpcException(message = "thread/list returned a repeated pagination cursor")
@@ -131,7 +135,9 @@ class AppServerClient(
             },
         )
         return ThreadListPage(
-            threads = response.array("data").mapNotNull(::parseThread),
+            threads = deduplicateThreads(
+                response.array("data").mapNotNull(::parseThread),
+            ),
             nextCursor = response.string("nextCursor")?.takeIf(String::isNotBlank),
         )
     }
@@ -1133,6 +1139,12 @@ class AppServerClient(
                 },
             )
             val gitInfo = thread.obj("gitInfo")
+            val source = thread["source"]
+            val sourceKind = when (source) {
+                is JsonPrimitive -> source.contentOrNull
+                is JsonObject -> source.keys.firstOrNull()
+                else -> null
+            }
             return CodexThread(
                 id = id,
                 sessionId = thread.string("sessionId") ?: id,
@@ -1148,6 +1160,11 @@ class AppServerClient(
                 gitBranch = gitInfo?.string("branch"),
                 gitOriginUrl = gitInfo?.string("originUrl"),
                 raw = thread,
+                parentThreadId = thread.string("parentThreadId"),
+                sourceKind = sourceKind,
+                threadSource = thread.string("threadSource"),
+                agentNickname = thread.string("agentNickname"),
+                agentRole = thread.string("agentRole"),
             )
         }
 

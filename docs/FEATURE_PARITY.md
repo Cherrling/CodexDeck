@@ -69,6 +69,7 @@ Researched revisions:
 | Local/remote search and archived Threads | Implemented | Debounced `thread/list` search, archived toggle, and local visible-list filtering. |
 | Group by remote cwd and recent sort | Implemented | Normalized-cwd project grouping with tests; server sort by `updated_at`. |
 | Collapsible per-Server project groups | Implemented | Sessions are grouped by normalized remote `cwd`; collapse state is keyed by Host plus directory and Thread rows open directly into Chat. |
+| Stable Session identity | Implemented | Repeated Thread IDs are merged while preserving newest metadata and active runtime status; subagent and other non-user thread records are kept out of top-level Session rows. |
 | Create, resume, fork, rename, archive | Implemented | Current v2 methods; resume and first history page are separate calls. |
 | Lazy transcript history | Implemented, device-unverified | Resume excludes Turns; initial load is five latest Turn summaries plus 40 Items. A deliberate top drag loads one 50-Item page through the global Item cursor, with a 20-Turn bounded fallback for older servers. |
 | Multiple Android Thread UI states | Implemented | Eight-view LRU with per-Thread Turn list, running state, and history cursor. |

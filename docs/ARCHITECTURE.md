@@ -215,6 +215,13 @@ their own snapshot; selecting a Host swaps that snapshot into the main Compose s
 without closing other SSH/App Server connections. Thread and approval IDs are never
 treated as globally unique across Hosts.
 
+`thread/list` records are normalized by canonical Thread ID before they enter a Host
+snapshot. Overlapping records retain the newest metadata and any active runtime status.
+Subagent and internal records (`parentThreadId`, `source.subAgent`, a non-user
+`threadSource`, or AgentControl nickname/role metadata) remain available through the
+parent Thread's collaboration events but are not rendered as separate top-level Session
+rows.
+
 `thread/resume` establishes a subscription to the selected Thread. App-server can
 return history while also subscribing atomically to subsequent updates. After a
 transport loss, CodexDeck reconnects and resumes the Thread again. It never treats the

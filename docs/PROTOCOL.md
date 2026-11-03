@@ -184,6 +184,13 @@ per-capability unavailable state.
 CodexDeck initially loads one page, exposes explicit load-more, and debounces remote
 search. Archived Threads use the same method with `archived: true`.
 
+Every page is normalized by canonical Thread `id` before it reaches the UI. If a server
+returns the same Thread more than once, CodexDeck keeps the newest metadata and merges
+an active runtime status from any copy. Threads identified by `parentThreadId`,
+`source.subAgent`, a non-user `threadSource`, or AgentControl nickname/role metadata are
+not inserted into the top-level Session list; collaboration events remain attached to
+the parent Thread.
+
 Recent history uses `thread/resume` with `excludeTurns: true`. CodexDeck then requests
 the latest five Turn summaries with `thread/turns/list` and the latest 40 Items with one
 global `thread/items/list` request. The Android UI merges only the returned Item-to-Turn

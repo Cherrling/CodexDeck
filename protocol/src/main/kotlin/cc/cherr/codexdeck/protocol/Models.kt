@@ -34,7 +34,66 @@ data class CodexThread(
     val gitBranch: String?,
     val gitOriginUrl: String?,
     val raw: JsonObject,
-)
+    val parentThreadId: String? = null,
+    val sourceKind: String? = null,
+    val threadSource: String? = null,
+    val agentNickname: String? = null,
+    val agentRole: String? = null,
+) {
+    val isSubagent: Boolean
+        get() = parentThreadId != null ||
+            sourceKind?.startsWith("subAgent", ignoreCase = true) == true ||
+            agentNickname != null ||
+            agentRole != null
+
+    val isUserVisible: Boolean
+        get() = !isSubagent &&
+            (threadSource == null || threadSource.equals("user", ignoreCase = true))
+}
+
+/**
+ * Collapse overlapping thread-list records by canonical Thread ID while preserving the
+ * newest metadata and the most authoritative runtime status.
+ */
+fun deduplicateThreads(threads: List<CodexThread>): List<CodexThread> {
+    val byId = linkedMapOf<String, CodexThread>()
+    threads.forEach { candidate ->
+        val current = byId[candidate.id]
+        byId[candidate.id] = if (current == null) {
+            candidate
+        } else {
+            mergeThreadRecords(current, candidate)
+        }
+    }
+    return byId.values.toList()
+}
+
+private fun mergeThreadRecords(current: CodexThread, candidate: CodexThread): CodexThread {
+    val newest = if (candidate.updatedAt >= current.updatedAt) candidate else current
+    val status = when {
+        candidate.status.isActive -> candidate.status
+        current.status.isActive -> current.status
+        candidate.status.isLoaded && !current.status.isLoaded -> candidate.status
+        else -> newest.status
+    }
+    val sourceKind = when {
+        current.isSubagent || candidate.isSubagent -> "subAgent"
+        else -> newest.sourceKind ?: current.sourceKind ?: candidate.sourceKind
+    }
+    val threadSource = when {
+        current.isUserVisible && !candidate.isUserVisible -> candidate.threadSource
+        candidate.isUserVisible && !current.isUserVisible -> current.threadSource
+        else -> newest.threadSource ?: current.threadSource ?: candidate.threadSource
+    }
+    return newest.copy(
+        status = status,
+        parentThreadId = current.parentThreadId ?: candidate.parentThreadId,
+        sourceKind = sourceKind,
+        threadSource = threadSource,
+        agentNickname = current.agentNickname ?: candidate.agentNickname,
+        agentRole = current.agentRole ?: candidate.agentRole,
+    )
+}
 
 data class ThreadRuntimeStatus(
     val type: String,
