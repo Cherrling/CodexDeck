@@ -99,7 +99,13 @@ class WebSocketJsonLineTransport private constructor(
         override fun onMessage(webSocket: WebSocket, text: String) {
             if (closed.get()) return
             if (text.length > MAX_PROTOCOL_MESSAGE_CHARS) {
-                fail(IOException("WebSocket inbound message exceeds the protocol size limit"))
+                fail(
+                    IOException(
+                        "WebSocket inbound message exceeds the " +
+                            "${MAX_PROTOCOL_MESSAGE_CHARS / (1024 * 1024)} MiB limit " +
+                            "(received ${text.length} characters)",
+                    ),
+                )
                 return
             }
             val queued = incomingChannel.trySend(text)
@@ -141,7 +147,7 @@ class WebSocketJsonLineTransport private constructor(
     }
 
     companion object {
-        private const val MAX_PROTOCOL_MESSAGE_CHARS = 16 * 1024 * 1024
+        private const val MAX_PROTOCOL_MESSAGE_CHARS = 64 * 1024 * 1024
 
         suspend fun connect(
             url: String,

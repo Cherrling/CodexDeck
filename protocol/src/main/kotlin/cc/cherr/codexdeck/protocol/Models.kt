@@ -126,6 +126,12 @@ data class TurnPage(
     val backwardsCursor: String?,
 )
 
+data class ThreadItemPage(
+    val items: List<ThreadItem>,
+    val nextCursor: String?,
+    val backwardsCursor: String?,
+)
+
 data class ModelInfo(
     val id: String,
     val displayName: String,

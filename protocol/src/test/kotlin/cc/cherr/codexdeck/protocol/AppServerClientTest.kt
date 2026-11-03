@@ -269,6 +269,85 @@ class AppServerClientTest {
     }
 
     @Test
+    fun turnHistoryUsesSummaryMetadataAndPaginatedItemDetails() = runTest {
+        val transport = FakeTransport()
+        val client = AppServerClient(
+            transport = transport,
+            clientInfo = ClientInfo(version = "test"),
+            scope = this,
+        )
+        val initialize = async { client.initialize() }
+        transport.emit(ok(transport.receiveRequest().id, buildJsonObject {}))
+        initialize.await()
+        transport.receiveNotification()
+
+        val turns = async {
+            client.listTurns(threadId = "thread-1", limit = 10, sortDirection = "desc")
+        }
+        val turnsRequest = transport.receiveRequest()
+        assertEquals("thread/turns/list", turnsRequest.method)
+        assertEquals("summary", turnsRequest.params["itemsView"]?.jsonPrimitive?.content)
+        assertEquals(10, turnsRequest.params["limit"]?.jsonPrimitive?.int)
+        transport.emit(
+            ok(
+                turnsRequest.id,
+                buildJsonObject {
+                    put("data", buildJsonArray {
+                        add(buildJsonObject {
+                            put("id", "turn-1")
+                            put("status", "completed")
+                            put("items", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("id", "summary-item")
+                                    put("type", "agentMessage")
+                                })
+                            })
+                        })
+                    })
+                    put("nextCursor", kotlinx.serialization.json.JsonNull)
+                },
+            ),
+        )
+        assertEquals("summary-item", turns.await().turns.single().items.single().id)
+
+        val itemDetails = async { client.listAllTurnItems("thread-1", "turn-1") }
+        val firstItemsRequest = transport.receiveRequest()
+        assertEquals("thread/items/list", firstItemsRequest.method)
+        assertEquals("turn-1", firstItemsRequest.params["turnId"]?.jsonPrimitive?.content)
+        assertEquals("asc", firstItemsRequest.params["sortDirection"]?.jsonPrimitive?.content)
+        assertEquals(25, firstItemsRequest.params["limit"]?.jsonPrimitive?.int)
+        transport.emit(
+            ok(
+                firstItemsRequest.id,
+                buildJsonObject {
+                    put("data", buildJsonArray {
+                        add(itemEntry("item-1"))
+                    })
+                    put("nextCursor", "items-page-2")
+                },
+            ),
+        )
+        val secondItemsRequest = transport.receiveRequest()
+        assertEquals(
+            "items-page-2",
+            secondItemsRequest.params["cursor"]?.jsonPrimitive?.content,
+        )
+        transport.emit(
+            ok(
+                secondItemsRequest.id,
+                buildJsonObject {
+                    put("data", buildJsonArray {
+                        add(itemEntry("item-2"))
+                    })
+                    put("nextCursor", kotlinx.serialization.json.JsonNull)
+                },
+            ),
+        )
+        assertEquals(listOf("item-1", "item-2"), itemDetails.await().map { it.id })
+        client.close()
+    }
+
+    @Test
     fun parsesMultiClientSettingsResolutionAndTurnDiffEvents() = runTest {
         val transport = FakeTransport()
         val client = AppServerClient(
@@ -389,6 +468,15 @@ class AppServerClientTest {
         put("updatedAt", 2)
         put("status", buildJsonObject { put("type", "idle") })
         put("ephemeral", false)
+    }
+
+    private fun itemEntry(id: String): JsonObject = buildJsonObject {
+        put("turnId", "turn-1")
+        put("item", buildJsonObject {
+            put("id", id)
+            put("type", "commandExecution")
+            put("status", "completed")
+        })
     }
 
     private fun ok(id: Long, result: JsonObject): JsonObject = buildJsonObject {

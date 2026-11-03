@@ -195,8 +195,9 @@ class AppServerClient(
     suspend fun listTurns(
         threadId: String,
         cursor: String? = null,
-        limit: Int = 20,
+        limit: Int = 10,
         sortDirection: String = "desc",
+        itemsView: String = "summary",
     ): TurnPage {
         val response = requestObject(
             "thread/turns/list",
@@ -204,7 +205,7 @@ class AppServerClient(
                 put("threadId", threadId)
                 put("limit", limit.coerceIn(1, 100))
                 put("sortDirection", sortDirection)
-                put("itemsView", "full")
+                put("itemsView", itemsView)
                 cursor?.let { put("cursor", it) }
             },
         )
@@ -213,6 +214,51 @@ class AppServerClient(
             nextCursor = response.string("nextCursor"),
             backwardsCursor = response.string("backwardsCursor"),
         )
+    }
+
+    suspend fun listTurnItems(
+        threadId: String,
+        turnId: String,
+        cursor: String? = null,
+        limit: Int = 25,
+        sortDirection: String = "asc",
+    ): ThreadItemPage {
+        val response = requestObject(
+            "thread/items/list",
+            buildJsonObject {
+                put("threadId", threadId)
+                put("turnId", turnId)
+                put("limit", limit.coerceIn(1, 100))
+                put("sortDirection", sortDirection)
+                cursor?.let { put("cursor", it) }
+            },
+        )
+        return ThreadItemPage(
+            items = response.array("data").mapNotNull { entry ->
+                entry.asObject()?.get("item")?.let(::parseItem)
+            },
+            nextCursor = response.string("nextCursor"),
+            backwardsCursor = response.string("backwardsCursor"),
+        )
+    }
+
+    suspend fun listAllTurnItems(threadId: String, turnId: String): List<ThreadItem> {
+        val items = linkedMapOf<String, ThreadItem>()
+        val cursors = mutableSetOf<String>()
+        var cursor: String? = null
+        do {
+            val page = listTurnItems(
+                threadId = threadId,
+                turnId = turnId,
+                cursor = cursor,
+            )
+            page.items.forEach { items[it.id] = it }
+            cursor = page.nextCursor
+            if (cursor != null && !cursors.add(cursor)) {
+                throw RpcException(message = "thread/items/list returned a repeated pagination cursor")
+            }
+        } while (cursor != null)
+        return items.values.toList()
     }
 
     suspend fun startThread(options: ThreadStartOptions): ThreadSession {

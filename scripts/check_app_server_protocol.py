@@ -119,6 +119,62 @@ def main() -> int:
         if not isinstance(page, dict) or not isinstance(page.get("data"), list):
             raise RuntimeError("thread/list returned an invalid result")
         print(f"thread/list OK: {len(page['data'])} visible thread(s) on first page")
+        if page["data"]:
+            thread_id = page["data"][0].get("id")
+            if not isinstance(thread_id, str) or not thread_id:
+                raise RuntimeError("thread/list returned a thread without an ID")
+            send(
+                {
+                    "id": 3,
+                    "method": "thread/turns/list",
+                    "params": {
+                        "threadId": thread_id,
+                        "limit": 1,
+                        "sortDirection": "desc",
+                        "itemsView": "summary",
+                    },
+                }
+            )
+            turns = wait_for_response(lines, 3, args.timeout)
+            if "error" in turns:
+                raise RuntimeError(f"thread/turns/list failed: {turns['error']}")
+            turns_result = turns.get("result")
+            if not isinstance(turns_result, dict) or not isinstance(
+                turns_result.get("data"), list
+            ):
+                raise RuntimeError("thread/turns/list returned an invalid result")
+            print(
+                "thread/turns/list OK:",
+                f"{len(turns_result['data'])} summary turn(s)",
+            )
+            if turns_result["data"]:
+                turn_id = turns_result["data"][0].get("id")
+                if not isinstance(turn_id, str) or not turn_id:
+                    raise RuntimeError("thread/turns/list returned a turn without an ID")
+                send(
+                    {
+                        "id": 4,
+                        "method": "thread/items/list",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "limit": 25,
+                            "sortDirection": "asc",
+                        },
+                    }
+                )
+                items = wait_for_response(lines, 4, args.timeout)
+                if "error" in items:
+                    raise RuntimeError(f"thread/items/list failed: {items['error']}")
+                items_result = items.get("result")
+                if not isinstance(items_result, dict) or not isinstance(
+                    items_result.get("data"), list
+                ):
+                    raise RuntimeError("thread/items/list returned an invalid result")
+                print(
+                    "thread/items/list OK:",
+                    f"{len(items_result['data'])} item(s) in first turn",
+                )
         return 0
     finally:
         process.stdin.close()

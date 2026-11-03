@@ -239,12 +239,16 @@ Thread's visible timeline.
 - The active Thread retains at most 120 Turns.
 - A single text/output field is capped at 524,288 characters with an explicit truncation
   marker.
+- Thread history requests summary metadata from `thread/turns/list`, then hydrates each
+  visible Turn through paginated `thread/items/list` requests. This avoids one oversized
+  response containing every command output and Diff.
 - LazyColumn keys are stable by Turn/item ID.
 - Database I/O and Base64 image file reads run off the main thread.
 - Message attachment limits are four images, 5 MiB per image, and 12 MiB of encoded data
   per send.
 - SSH stdout uses a 256-message bounded queue and a 16 MiB line limit. WebSocket uses a
-  512-message bounded queue and a 16 MiB text-frame limit; overflow closes the transport.
+  512-message bounded queue and a 64 MiB text-frame safety limit; overflow reports the
+  received size and closes the transport.
 
 ## Diagnostic logging
 

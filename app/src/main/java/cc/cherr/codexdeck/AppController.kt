@@ -43,7 +43,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -825,14 +828,14 @@ class AppController(
                 val session = client.resumeThread(
                     threadId = threadId,
                 )
-                val page = client.listTurns(threadId, limit = 20, sortDirection = "desc")
-                val chronological = page.turns.asReversed()
+                val page = client.listTurns(threadId, limit = 10, sortDirection = "desc")
+                val hydratedTurns = hydrateTurnItems(client, threadId, page.turns)
                 updateHostConnection(hostId) { current ->
                     val existing = current.threadViews[threadId]
                     val turns = mergeTurns(
                         existing?.turns.orEmpty(),
                         session.turns,
-                        chronological,
+                        hydratedTurns,
                     )
                     val activeTurn = turns.lastOrNull { it.status == "inProgress" }
                     val view = ThreadViewState(
@@ -922,11 +925,12 @@ class AppController(
             val startedAtNanos = System.nanoTime()
             updateHostConnection(hostId) { it.copy(isLoadingHistory = true) }
             try {
-                val page = client.listTurns(threadId, cursor = cursor, limit = 20, sortDirection = "desc")
+                val page = client.listTurns(threadId, cursor = cursor, limit = 10, sortDirection = "desc")
+                val hydratedTurns = hydrateTurnItems(client, threadId, page.turns)
                 updateHostConnection(hostId) { current ->
                     current.withThreadView(threadId) { view ->
                         view.copy(
-                            turns = mergeTurns(page.turns.asReversed(), view.turns),
+                            turns = mergeTurns(hydratedTurns.asReversed(), view.turns),
                             olderHistoryCursor = page.nextCursor,
                             lastUsedAt = System.currentTimeMillis(),
                         )
@@ -2065,6 +2069,19 @@ private fun upsertTurn(turns: List<ThreadTurn>, turn: ThreadTurn): List<ThreadTu
     } else {
         turns + turn
     }
+}
+
+private suspend fun hydrateTurnItems(
+    client: AppServerClient,
+    threadId: String,
+    turns: List<ThreadTurn>,
+): List<ThreadTurn> = coroutineScope {
+    turns.map { turn ->
+        async {
+            val items = client.listAllTurnItems(threadId, turn.id)
+            if (items.isEmpty()) turn else turn.copy(items = items)
+        }
+    }.awaitAll()
 }
 
 private fun mergeTurns(vararg pages: List<ThreadTurn>): List<ThreadTurn> =
