@@ -70,7 +70,7 @@ Researched revisions:
 | Group by remote cwd and recent sort | Implemented | Normalized-cwd project grouping with tests; server sort by `updated_at`. |
 | Collapsible per-Server project groups | Implemented | Sessions are grouped by normalized remote `cwd`; collapse state is keyed by Host plus directory and Thread rows open directly into Chat. |
 | Create, resume, fork, rename, archive | Implemented | Current v2 methods; resume and first history page are separate calls. |
-| Older Turn history pagination | Implemented | `thread/turns/list` summary pages are hydrated through paginated `thread/items/list`, merged chronologically, and bounded in memory. |
+| Lazy transcript history | Implemented, device-unverified | Resume excludes Turns; initial load is five latest Turn summaries plus 40 Items. A deliberate top drag loads one 50-Item page through the global Item cursor, with a 20-Turn bounded fallback for older servers. |
 | Multiple Android Thread UI states | Implemented | Eight-view LRU with per-Thread Turn list, running state, and history cursor. |
 | Project cwd and Git branch context | Implemented | Threads are grouped by authoritative remote `cwd`; parsed `gitInfo.branch` is shown in the session row. |
 | Full Git worktree inventory | Partial | Current Thread payload contributes cwd/branch/origin only; broader worktree discovery needs explicit server methods or shell-backed, opt-in inspection. |

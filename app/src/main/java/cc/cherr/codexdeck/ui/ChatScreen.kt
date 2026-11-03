@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -58,6 +59,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -107,18 +109,39 @@ fun ChatScreen(
     val rows = remember(state.turns) { buildTimelineRows(state.turns) }
     val listState = rememberLazyListState()
     var autoFollow by remember { mutableStateOf(true) }
+    var historyRequestedDuringDrag by remember(state.selectedThreadId) {
+        mutableStateOf(false)
+    }
+    val rowsLastIndex by rememberUpdatedState(rows.lastIndex)
+    val isDragged by listState.interactionSource.collectIsDraggedAsState()
 
     LaunchedEffect(rows, autoFollow) {
         if (rows.isNotEmpty() && autoFollow) {
             listState.scrollToItem(rows.lastIndex)
         }
     }
-    LaunchedEffect(listState, state.olderHistoryCursor, rows.size) {
+    LaunchedEffect(
+        listState,
+        isDragged,
+        state.olderHistoryCursor,
+        state.olderTurnCursor,
+        state.isLoadingHistory,
+    ) {
+        if (!isDragged) historyRequestedDuringDrag = false
         snapshotFlow {
             listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
         }.collect { (visibleIndex) ->
-            autoFollow = visibleIndex >= rows.lastIndex - 1
-            if (visibleIndex == 0 && state.olderHistoryCursor != null) {
+            if (isDragged) {
+                autoFollow = visibleIndex >= rowsLastIndex - 1
+            }
+            if (
+                isDragged &&
+                !state.isLoadingHistory &&
+                !historyRequestedDuringDrag &&
+                visibleIndex == 0 &&
+                (state.olderHistoryCursor != null || state.olderTurnCursor != null)
+            ) {
+                historyRequestedDuringDrag = true
                 controller.loadOlderHistory()
             }
         }

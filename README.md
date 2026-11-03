@@ -30,6 +30,8 @@ published `SHA256SUMS`.
 - Optional SSH local-port forwarding to a remote loopback WebSocket app-server.
 - Paginated Thread list, remote title/cwd/preview search, archived Threads, resume,
   create, rename, fork, archive/unarchive, compaction, and history pagination.
+- Lazy Session opening: five latest Turn summaries and 40 Items initially, followed by
+  one 50-Item page only when the user drags to the top.
 - Multiple manually connected Hosts with independent app-server clients, Thread
   catalogs, approvals, and running-Turn state; switch Hosts without disconnecting others.
 - Collapsible project groups derived from each Server's remote `cwd`, with per-Server

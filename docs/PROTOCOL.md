@@ -161,7 +161,7 @@ params and the user's decision payload are not sent to the trace log.
 | Lifecycle | `initialize`, `initialized` |
 | Threads | `thread/list`, `thread/read`, `thread/loaded/list`, `thread/start`, `thread/resume`, `thread/fork` |
 | Thread mutation | `thread/name/set`, `thread/archive`, `thread/unarchive`, `thread/compact/start` |
-| History | `thread/turns/list` |
+| History | `thread/turns/list`, `thread/items/list` |
 | Turns | `turn/start`, `turn/steer`, `turn/interrupt` |
 | Review | `review/start` with inline uncommitted-changes target |
 | Models/options | `model/list`, `collaborationMode/list`, `permissionProfile/list` |
@@ -184,11 +184,22 @@ per-capability unavailable state.
 CodexDeck initially loads one page, exposes explicit load-more, and debounces remote
 search. Archived Threads use the same method with `archived: true`.
 
-Recent Turn history uses `thread/turns/list` after `thread/resume` with
-`excludeTurns: true`. The first page is requested descending and converted to
-chronological display order. Older pages use the returned cursor. Full-history
-hydration is intentionally avoided because current app-server marks it deprecated for
-paginated Threads.
+Recent history uses `thread/resume` with `excludeTurns: true`. CodexDeck then requests
+the latest five Turn summaries with `thread/turns/list` and the latest 40 Items with one
+global `thread/items/list` request. The Android UI merges only the returned Item-to-Turn
+metadata it needs, then displays the result chronologically.
+
+Older history is loaded only after a deliberate upward drag reaches the top. Each gesture
+requests at most one additional 50-Item page, passing the opaque `nextCursor` back as
+`cursor` with `sortDirection: "desc"`. An additional Turn page is fetched only when an
+Item page references a Turn whose metadata is not loaded yet. If a server exposes no
+Item cursor, the fallback advances at most 20 Turn summaries per request. Empty pages
+clear the cursor so a client cannot poll forever.
+
+Full-history hydration is intentionally avoided because current app-server marks it
+deprecated for paginated Threads. For legacy rollout storage, the server may still replay
+the full rollout internally while constructing even a small page; that cost is a server
+implementation detail and is not equivalent to sending the full history to Android.
 
 ## Thread resume and subscriptions
 

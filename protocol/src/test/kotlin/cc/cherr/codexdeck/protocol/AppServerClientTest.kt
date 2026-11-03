@@ -310,11 +310,17 @@ class AppServerClientTest {
         )
         assertEquals("summary-item", turns.await().turns.single().items.single().id)
 
-        val itemDetails = async { client.listAllTurnItems("thread-1", "turn-1") }
+        val itemDetails = async {
+            client.listThreadItems(
+                threadId = "thread-1",
+                limit = 25,
+                sortDirection = "desc",
+            )
+        }
         val firstItemsRequest = transport.receiveRequest()
         assertEquals("thread/items/list", firstItemsRequest.method)
-        assertEquals("turn-1", firstItemsRequest.params["turnId"]?.jsonPrimitive?.content)
-        assertEquals("asc", firstItemsRequest.params["sortDirection"]?.jsonPrimitive?.content)
+        assertFalse(firstItemsRequest.params.containsKey("turnId"))
+        assertEquals("desc", firstItemsRequest.params["sortDirection"]?.jsonPrimitive?.content)
         assertEquals(25, firstItemsRequest.params["limit"]?.jsonPrimitive?.int)
         transport.emit(
             ok(
@@ -327,14 +333,24 @@ class AppServerClientTest {
                 },
             ),
         )
-        val secondItemsRequest = transport.receiveRequest()
-        assertEquals(
-            "items-page-2",
-            secondItemsRequest.params["cursor"]?.jsonPrimitive?.content,
-        )
+        val itemsPage = itemDetails.await()
+        assertEquals(listOf("item-1"), itemsPage.items.map { it.id })
+        assertEquals(listOf("turn-1"), itemsPage.entries.map { it.turnId })
+        assertEquals("items-page-2", itemsPage.nextCursor)
+
+        val nextItemPage = async {
+            client.listThreadItems(
+                threadId = "thread-1",
+                cursor = itemsPage.nextCursor,
+                limit = 25,
+                sortDirection = "desc",
+            )
+        }
+        val nextItemsRequest = transport.receiveRequest()
+        assertEquals("items-page-2", nextItemsRequest.params["cursor"]?.jsonPrimitive?.content)
         transport.emit(
             ok(
-                secondItemsRequest.id,
+                nextItemsRequest.id,
                 buildJsonObject {
                     put("data", buildJsonArray {
                         add(itemEntry("item-2"))
@@ -343,7 +359,7 @@ class AppServerClientTest {
                 },
             ),
         )
-        assertEquals(listOf("item-1", "item-2"), itemDetails.await().map { it.id })
+        assertEquals(listOf("item-2"), nextItemPage.await().items.map { it.id })
         client.close()
     }
 

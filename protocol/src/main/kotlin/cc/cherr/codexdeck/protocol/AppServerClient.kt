@@ -188,6 +188,7 @@ class AppServerClient(
             permissionProfile = response.obj("activePermissionProfile")?.string("id"),
             turns = inlineTurns,
             turnsNextCursor = response.string("turnsBackwardsCursor"),
+            itemsNextCursor = response.string("itemsBackwardsCursor"),
             raw = response,
         )
     }
@@ -222,20 +223,37 @@ class AppServerClient(
         cursor: String? = null,
         limit: Int = 25,
         sortDirection: String = "asc",
+    ): ThreadItemPage = listThreadItems(
+        threadId = threadId,
+        turnId = turnId,
+        cursor = cursor,
+        limit = limit,
+        sortDirection = sortDirection,
+    )
+
+    suspend fun listThreadItems(
+        threadId: String,
+        turnId: String? = null,
+        cursor: String? = null,
+        limit: Int = 50,
+        sortDirection: String = "desc",
     ): ThreadItemPage {
         val response = requestObject(
             "thread/items/list",
             buildJsonObject {
                 put("threadId", threadId)
-                put("turnId", turnId)
+                turnId?.let { put("turnId", it) }
                 put("limit", limit.coerceIn(1, 100))
                 put("sortDirection", sortDirection)
                 cursor?.let { put("cursor", it) }
             },
         )
         return ThreadItemPage(
-            items = response.array("data").mapNotNull { entry ->
-                entry.asObject()?.get("item")?.let(::parseItem)
+            entries = response.array("data").mapNotNull { element ->
+                val entry = element.asObject() ?: return@mapNotNull null
+                val entryTurnId = entry.string("turnId") ?: turnId ?: return@mapNotNull null
+                val item = entry["item"]?.let(::parseItem) ?: return@mapNotNull null
+                ThreadItemEntry(turnId = entryTurnId, item = item)
             },
             nextCursor = response.string("nextCursor"),
             backwardsCursor = response.string("backwardsCursor"),
@@ -294,6 +312,7 @@ class AppServerClient(
             permissionProfile = response.obj("activePermissionProfile")?.string("id"),
             turns = emptyList(),
             turnsNextCursor = response.string("turnsBackwardsCursor"),
+            itemsNextCursor = response.string("itemsBackwardsCursor"),
             raw = response,
         )
     }
@@ -327,6 +346,7 @@ class AppServerClient(
             permissionProfile = response.obj("activePermissionProfile")?.string("id"),
             turns = emptyList(),
             turnsNextCursor = response.string("turnsBackwardsCursor"),
+            itemsNextCursor = response.string("itemsBackwardsCursor"),
             raw = response,
         )
     }

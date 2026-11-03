@@ -23,6 +23,7 @@ import cc.cherr.codexdeck.protocol.RequestId
 import cc.cherr.codexdeck.protocol.RpcException
 import cc.cherr.codexdeck.protocol.RpcTraceEvent
 import cc.cherr.codexdeck.protocol.ThreadItem
+import cc.cherr.codexdeck.protocol.ThreadItemEntry
 import cc.cherr.codexdeck.protocol.ThreadSession
 import cc.cherr.codexdeck.protocol.ThreadSettingsSnapshot
 import cc.cherr.codexdeck.protocol.ThreadStartOptions
@@ -43,10 +44,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -77,6 +75,10 @@ private const val MAX_CACHED_THREAD_VIEWS = 8
 private const val MAX_IMAGE_ATTACHMENTS = 4
 private const val MAX_IMAGE_DATA_CHARS = 12 * 1024 * 1024
 private const val TRUNCATION_MARKER = "\n\n[Earlier output truncated by CodexDeck]\n\n"
+private const val INITIAL_HISTORY_TURNS = 5
+private const val INITIAL_HISTORY_ITEMS = 40
+private const val OLDER_HISTORY_ITEMS = 50
+private const val OLDER_HISTORY_TURNS = 20
 
 private class HostRuntime(val hostId: String) {
     val generation = AtomicInteger()
@@ -819,6 +821,7 @@ class AppController(
                     selectedSession = cached?.session,
                     turns = cached?.turns.orEmpty(),
                     olderHistoryCursor = cached?.olderHistoryCursor,
+                    olderTurnCursor = cached?.olderTurnCursor,
                     activeTurnId = cached?.activeTurnId,
                     isTurnRunning = cached?.isTurnRunning == true,
                     error = null,
@@ -828,21 +831,26 @@ class AppController(
                 val session = client.resumeThread(
                     threadId = threadId,
                 )
-                val page = client.listTurns(threadId, limit = 10, sortDirection = "desc")
-                val hydratedTurns = hydrateTurnItems(client, threadId, page.turns)
+                val initialHistory = loadInitialHistory(
+                    client = client,
+                    threadId = threadId,
+                    itemCursor = session.itemsNextCursor,
+                )
                 updateHostConnection(hostId) { current ->
                     val existing = current.threadViews[threadId]
                     val turns = mergeTurns(
                         existing?.turns.orEmpty(),
-                        session.turns,
-                        hydratedTurns,
+                        initialHistory.turns,
                     )
                     val activeTurn = turns.lastOrNull { it.status == "inProgress" }
                     val view = ThreadViewState(
                         threadId = threadId,
                         session = session,
                         turns = turns,
-                        olderHistoryCursor = page.nextCursor ?: existing?.olderHistoryCursor,
+                        olderHistoryCursor =
+                            existing?.olderHistoryCursor ?: initialHistory.itemCursor,
+                        olderTurnCursor =
+                            existing?.olderTurnCursor ?: initialHistory.turnCursor,
                         activeTurnId = activeTurn?.id ?: existing?.activeTurnId,
                         isTurnRunning = activeTurn != null,
                         lastUsedAt = System.currentTimeMillis(),
@@ -857,6 +865,7 @@ class AppController(
                         selectedSession = session,
                         turns = view.turns,
                         olderHistoryCursor = view.olderHistoryCursor,
+                        olderTurnCursor = view.olderTurnCursor,
                         activeTurnId = view.activeTurnId,
                         isTurnRunning = view.isTurnRunning,
                         isLoadingThread = false,
@@ -868,7 +877,9 @@ class AppController(
                 }
                 diagnosticLog.log(
                     "thread",
-                    "resume complete host=$hostId thread=$threadId turns=${page.turns.size} " +
+                    "resume complete host=$hostId thread=$threadId " +
+                        "turns=${initialHistory.turns.size} " +
+                        "items=${initialHistory.turns.sumOf { it.items.size }} " +
                         "durationMs=${elapsedMillis(startedAtNanos)}",
                 )
             } catch (failure: Throwable) {
@@ -898,6 +909,7 @@ class AppController(
                 activeTurnId = null,
                 isTurnRunning = false,
                 olderHistoryCursor = null,
+                olderTurnCursor = null,
                 isLoadingThread = false,
                 isLoadingHistory = false,
                 isSending = false,
@@ -919,19 +931,52 @@ class AppController(
         val client = activeClient() ?: return
         val stateBefore = state.value.connectionState(hostId)
         val threadId = stateBefore.selectedThreadId ?: return
-        val cursor = stateBefore.olderHistoryCursor ?: return
+        val itemCursor = stateBefore.olderHistoryCursor
+        val turnCursor = stateBefore.olderTurnCursor
+        if (itemCursor == null && turnCursor == null) return
         if (stateBefore.isLoadingHistory) return
         scope.launch {
             val startedAtNanos = System.nanoTime()
             updateHostConnection(hostId) { it.copy(isLoadingHistory = true) }
             try {
-                val page = client.listTurns(threadId, cursor = cursor, limit = 10, sortDirection = "desc")
-                val hydratedTurns = hydrateTurnItems(client, threadId, page.turns)
+                val viewBefore = state.value.connectionState(hostId).threadViews[threadId]
+                    ?: state.value.connectionState(hostId).activeThreadView()
+                val history = if (itemCursor != null) {
+                    val page = client.listThreadItems(
+                        threadId = threadId,
+                        cursor = itemCursor,
+                        limit = OLDER_HISTORY_ITEMS,
+                        sortDirection = "desc",
+                    )
+                    mergeHistoryItemPage(
+                        client = client,
+                        threadId = threadId,
+                        turns = viewBefore?.turns.orEmpty(),
+                        turnCursor = turnCursor,
+                        page = page,
+                    )
+                } else {
+                    // Older servers can expose only turn pagination. Keep the fallback
+                    // bounded; item pagination remains the preferred path.
+                    val page = client.listTurns(
+                        threadId = threadId,
+                        cursor = turnCursor,
+                        limit = OLDER_HISTORY_TURNS,
+                        sortDirection = "desc",
+                        itemsView = "notLoaded",
+                    )
+                    ThreadHistoryWindow(
+                        turns = mergeTurns(viewBefore?.turns.orEmpty(), page.turns),
+                        itemCursor = null,
+                        turnCursor = page.nextCursor,
+                    )
+                }
                 updateHostConnection(hostId) { current ->
                     current.withThreadView(threadId) { view ->
                         view.copy(
-                            turns = mergeTurns(hydratedTurns.asReversed(), view.turns),
-                            olderHistoryCursor = page.nextCursor,
+                            turns = history.turns,
+                            olderHistoryCursor = history.itemCursor,
+                            olderTurnCursor = history.turnCursor,
                             lastUsedAt = System.currentTimeMillis(),
                         )
                     }.copy(
@@ -945,7 +990,8 @@ class AppController(
                 syncForegroundService()
                 diagnosticLog.log(
                     "history",
-                    "loaded host=$hostId thread=$threadId turns=${page.turns.size} " +
+                    "loaded host=$hostId thread=$threadId turns=${history.turns.size} " +
+                        "items=${history.turns.sumOf { it.items.size }} " +
                         "durationMs=${elapsedMillis(startedAtNanos)}",
                 )
             } catch (failure: Throwable) {
@@ -1002,6 +1048,7 @@ class AppController(
                         activeTurnId = null,
                         isTurnRunning = false,
                         olderHistoryCursor = null,
+                        olderTurnCursor = null,
                     ).withSelectedSession(session)
                 }
                 _state.update { it.copy(busy = false) }
@@ -2071,17 +2118,82 @@ private fun upsertTurn(turns: List<ThreadTurn>, turn: ThreadTurn): List<ThreadTu
     }
 }
 
-private suspend fun hydrateTurnItems(
+private data class ThreadHistoryWindow(
+    val turns: List<ThreadTurn>,
+    val itemCursor: String?,
+    val turnCursor: String?,
+)
+
+private suspend fun loadInitialHistory(
+    client: AppServerClient,
+    threadId: String,
+    itemCursor: String?,
+): ThreadHistoryWindow {
+    val turnPage = client.listTurns(
+        threadId = threadId,
+        limit = INITIAL_HISTORY_TURNS,
+        sortDirection = "desc",
+        itemsView = "notLoaded",
+    )
+    val itemPage = client.listThreadItems(
+        threadId = threadId,
+        cursor = itemCursor,
+        limit = INITIAL_HISTORY_ITEMS,
+        sortDirection = "desc",
+    )
+    return mergeHistoryItemPage(
+        client = client,
+        threadId = threadId,
+        turns = turnPage.turns,
+        turnCursor = turnPage.nextCursor,
+        page = itemPage,
+    )
+}
+
+private suspend fun mergeHistoryItemPage(
     client: AppServerClient,
     threadId: String,
     turns: List<ThreadTurn>,
-): List<ThreadTurn> = coroutineScope {
-    turns.map { turn ->
-        async {
-            val items = client.listAllTurnItems(threadId, turn.id)
-            if (items.isEmpty()) turn else turn.copy(items = items)
+    turnCursor: String?,
+    page: cc.cherr.codexdeck.protocol.ThreadItemPage,
+): ThreadHistoryWindow {
+    val mergedTurns = turns.associateByTo(linkedMapOf(), ThreadTurn::id)
+    val missingTurnIds = page.entries.mapTo(linkedSetOf(), ThreadItemEntry::turnId)
+        .apply { removeAll(mergedTurns.keys) }
+    val seenTurnCursors = mutableSetOf<String>()
+    var nextTurnCursor = turnCursor
+    while (missingTurnIds.isNotEmpty()) {
+        val cursor = nextTurnCursor?.takeIf(seenTurnCursors::add) ?: break
+        val missingPage = client.listTurns(
+            threadId = threadId,
+            cursor = cursor,
+            limit = missingTurnIds.size.coerceIn(1, 100),
+            sortDirection = "desc",
+            itemsView = "notLoaded",
+        )
+        missingPage.turns.forEach { turn ->
+            mergedTurns[turn.id] = turn
+            missingTurnIds.remove(turn.id)
         }
-    }.awaitAll()
+        nextTurnCursor = missingPage.nextCursor
+        if (missingPage.turns.isEmpty()) break
+    }
+
+    page.entries.groupBy(ThreadItemEntry::turnId).forEach { (turnId, entries) ->
+        val turn = mergedTurns[turnId] ?: return@forEach
+        val existingIds = turn.items.mapTo(mutableSetOf(), ThreadItem::id)
+        val olderEntries = entries.asReversed().map(ThreadItemEntry::item)
+            .filter { existingIds.add(it.id) }
+        if (olderEntries.isNotEmpty()) {
+            mergedTurns[turnId] = turn.copy(items = olderEntries + turn.items)
+        }
+    }
+
+    return ThreadHistoryWindow(
+        turns = trimTurns(mergedTurns.values.sortedBy { it.startedAt ?: Long.MAX_VALUE }),
+        itemCursor = page.nextCursor.takeIf { page.entries.isNotEmpty() },
+        turnCursor = nextTurnCursor,
+    )
 }
 
 private fun mergeTurns(vararg pages: List<ThreadTurn>): List<ThreadTurn> =
@@ -2123,6 +2235,7 @@ private fun AppState.activeThreadView(): ThreadViewState? {
         session = selectedSession,
         turns = turns,
         olderHistoryCursor = olderHistoryCursor,
+        olderTurnCursor = olderTurnCursor,
         activeTurnId = activeTurnId,
         isTurnRunning = isTurnRunning,
         lastUsedAt = threadViews[id]?.lastUsedAt ?: System.currentTimeMillis(),
@@ -2136,6 +2249,7 @@ private fun HostConnectionState.activeThreadView(): ThreadViewState? {
         session = selectedSession,
         turns = turns,
         olderHistoryCursor = olderHistoryCursor,
+        olderTurnCursor = olderTurnCursor,
         activeTurnId = activeTurnId,
         isTurnRunning = isTurnRunning,
         lastUsedAt = threadViews[id]?.lastUsedAt ?: System.currentTimeMillis(),
@@ -2159,6 +2273,7 @@ private fun AppState.withThreadView(
             selectedSession = updated.session,
             turns = updated.turns,
             olderHistoryCursor = updated.olderHistoryCursor,
+            olderTurnCursor = updated.olderTurnCursor,
             activeTurnId = updated.activeTurnId,
             isTurnRunning = updated.isTurnRunning,
         )
@@ -2177,6 +2292,7 @@ private fun HostConnectionState.withThreadView(
             session = selectedSession,
             turns = turns,
             olderHistoryCursor = olderHistoryCursor,
+            olderTurnCursor = olderTurnCursor,
             activeTurnId = activeTurnId,
             isTurnRunning = isTurnRunning,
             lastUsedAt = threadViews[id]?.lastUsedAt ?: System.currentTimeMillis(),
@@ -2194,6 +2310,7 @@ private fun HostConnectionState.withThreadView(
             selectedSession = updated.session,
             turns = updated.turns,
             olderHistoryCursor = updated.olderHistoryCursor,
+            olderTurnCursor = updated.olderTurnCursor,
             activeTurnId = updated.activeTurnId,
             isTurnRunning = updated.isTurnRunning,
         )

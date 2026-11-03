@@ -62,6 +62,7 @@ data class ThreadSession(
     val permissionProfile: String?,
     val turns: List<ThreadTurn>,
     val turnsNextCursor: String?,
+    val itemsNextCursor: String?,
     val raw: JsonObject,
 )
 
@@ -126,11 +127,19 @@ data class TurnPage(
     val backwardsCursor: String?,
 )
 
+data class ThreadItemEntry(
+    val turnId: String,
+    val item: ThreadItem,
+)
+
 data class ThreadItemPage(
-    val items: List<ThreadItem>,
+    val entries: List<ThreadItemEntry>,
     val nextCursor: String?,
     val backwardsCursor: String?,
-)
+) {
+    val items: List<ThreadItem>
+        get() = entries.map(ThreadItemEntry::item)
+}
 
 data class ModelInfo(
     val id: String,

@@ -239,9 +239,15 @@ Thread's visible timeline.
 - The active Thread retains at most 120 Turns.
 - A single text/output field is capped at 524,288 characters with an explicit truncation
   marker.
-- Thread history requests summary metadata from `thread/turns/list`, then hydrates each
-  visible Turn through paginated `thread/items/list` requests. This avoids one oversized
-  response containing every command output and Diff.
+- Opening a Thread resumes with `excludeTurns: true`, requests the latest five Turn
+  summaries, and hydrates only the newest 40 Items through one global
+  `thread/items/list` page. It does not issue one full-history request per Turn.
+- Dragging to the top requests at most one additional 50-Item page per gesture using the
+  opaque global Item cursor. A Turn-only cursor is retained as a bounded 20-Turn fallback
+  for older servers; empty pages stop cursor advancement.
+- Current paginated Threads avoid transferring full rollout history. The app-server may
+  still replay an older rollout internally to build a legacy history page, so server CPU
+  cost cannot be inferred solely from the small Android response.
 - LazyColumn keys are stable by Turn/item ID.
 - Database I/O and Base64 image file reads run off the main thread.
 - Message attachment limits are four images, 5 MiB per image, and 12 MiB of encoded data
