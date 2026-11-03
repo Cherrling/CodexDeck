@@ -65,18 +65,20 @@ Thread listing were exercised with `codex-cli 0.166.0`.
 
 ### SSH to an existing app-server (preferred)
 
-Current Codex exposes `codex app-server proxy`, which forwards stdio bytes to the
-already-running local app-server control socket. CodexDeck uses this mode by default for
-new SSH Hosts:
+Current Codex exposes `codex app-server proxy`, which exposes the raw byte stream to the
+already-running local app-server control socket. That socket requires a WebSocket HTTP
+Upgrade; CodexDeck creates a loopback byte bridge and lets OkHttp perform the upgrade and
+frame the JSON-RPC messages. This mode is the default for new SSH Hosts:
 
 ```text
 exec '<codex executable>' app-server proxy \
   --sock "${CODEX_HOME:-$HOME/.codex}/app-server-control/app-server-control.sock"
 ```
 
-This does not start another runtime. The phone and a PC TUI can attach to the same
-in-memory Threads, active Turns, and subscriptions when both processes resolve the same
-`CODEX_HOME` and the daemon is running.
+This does not start another runtime and does not require a helper installed on the
+server. The phone and a PC TUI can attach to the same in-memory Threads, active Turns,
+and subscriptions when both processes resolve the same `CODEX_HOME` and the daemon is
+running.
 
 Start or inspect the daemon on the Linux server:
 
@@ -250,6 +252,13 @@ Real official-server checks:
 mkdir -p /tmp/codexdeck-codex-home
 CODEX_HOME=/tmp/codexdeck-codex-home \
 python3 scripts/check_app_server_protocol.py
+
+# Real codex-cli 0.166.0 Unix control socket through `app-server proxy`:
+# HTTP WebSocket upgrade, initialize, and Thread listing.
+docker run --rm --entrypoint python3 \
+  --volume "$(readlink -f "$(command -v codex)"):/codex:ro" \
+  --volume "$PWD/scripts/check_app_server_proxy.py:/check.py:ro" \
+  codexdeck-ssh-test:local /check.py --codex /codex
 
 # Opt-in WebSocket integration test against a running authenticated server
 CODEXDECK_WS_TEST_URL=ws://127.0.0.1:8765 \

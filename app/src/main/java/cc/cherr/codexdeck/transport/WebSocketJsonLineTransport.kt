@@ -27,6 +27,7 @@ import kotlin.time.Duration.Companion.seconds
 class WebSocketJsonLineTransport private constructor(
     private val url: String,
     private val bearerToken: String?,
+    private val headers: Map<String, String>,
     connectTimeout: Duration,
 ) : JsonLineTransport {
     private val closed = AtomicBoolean()
@@ -55,6 +56,7 @@ class WebSocketJsonLineTransport private constructor(
                 bearerToken?.takeIf(String::isNotBlank)?.let { token ->
                     header("Authorization", "Bearer $token")
                 }
+                headers.forEach { (name, value) -> header(name, value) }
             }
             .build()
         socket = client.newWebSocket(request, Listener())
@@ -146,6 +148,7 @@ class WebSocketJsonLineTransport private constructor(
             bearerToken: String?,
             connectTimeout: Duration = 15.seconds,
             allowInsecure: Boolean = false,
+            headers: Map<String, String> = emptyMap(),
         ): WebSocketJsonLineTransport {
             val uri = runCatching { URI(url) }
                 .getOrElse { throw IllegalArgumentException("WebSocket URL is invalid", it) }
@@ -158,7 +161,7 @@ class WebSocketJsonLineTransport private constructor(
             require(uri.scheme != "ws" || allowInsecure || isLoopbackHost(uri.host)) {
                 "Cleartext ws:// requires an explicit allow-insecure setting"
             }
-            return WebSocketJsonLineTransport(url, bearerToken, connectTimeout).open()
+            return WebSocketJsonLineTransport(url, bearerToken, headers, connectTimeout).open()
         }
 
         private fun isLoopbackHost(host: String?): Boolean =

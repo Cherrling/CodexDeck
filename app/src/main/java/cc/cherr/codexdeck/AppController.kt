@@ -30,6 +30,7 @@ import cc.cherr.codexdeck.protocol.ThreadTurn
 import cc.cherr.codexdeck.protocol.TurnOptions
 import cc.cherr.codexdeck.ssh.ConnectionPrompt
 import cc.cherr.codexdeck.ssh.ConnectionPromptGateway
+import cc.cherr.codexdeck.ssh.DiagnosticTransport
 import cc.cherr.codexdeck.ssh.SshAuthenticationCancelled
 import cc.cherr.codexdeck.ssh.SshConnectionManager
 import cc.cherr.codexdeck.ssh.SshJsonLineTransport
@@ -374,7 +375,10 @@ class AppController(
                     requireNotNull(sshConnection).openAppServer(host.codexExecutable)
                 }
                 AppServerTransportMode.SSH_EXISTING -> withContext(Dispatchers.IO) {
-                    requireNotNull(sshConnection).openExistingAppServer(host.codexExecutable)
+                    requireNotNull(sshConnection).openExistingAppServer(
+                        executable = host.codexExecutable,
+                        connectTimeout = host.connectTimeoutMs.milliseconds,
+                    )
                 }
                 else -> {
                     var effectiveUrl = host.appServerUrl
@@ -403,7 +407,7 @@ class AppController(
                 "opened host=${host.id} kind=${transport.javaClass.simpleName} " +
                     "durationMs=${elapsedMillis(connectStartedAtNanos)}",
             )
-            if (transport is SshJsonLineTransport) {
+            if (transport is DiagnosticTransport) {
                 runtime.diagnosticJob = scope.launch {
                     transport.diagnostics.collect { line ->
                         diagnosticLog.log("ssh-diagnostic", "host=${host.id} $line")

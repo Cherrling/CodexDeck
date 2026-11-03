@@ -137,11 +137,16 @@ The preferred SSH mode executes:
 exec '<configured path>' app-server proxy --sock "${CODEX_HOME:-$HOME/.codex}/app-server-control/app-server-control.sock"
 ```
 
-`proxy` is a byte bridge over stdin/stdout to the already-running local app-server
-control socket. It does not create another Runtime. This is what allows a phone and a PC
-TUI using the same Unix user and `CODEX_HOME` to observe or control the same loaded
-Threads. The Android app still sees the normal JSONL transport and does not depend on the
-control socket implementation.
+`proxy` is a raw byte bridge over stdin/stdout to the already-running local app-server
+control socket. The control socket uses the WebSocket protocol, not raw JSONL. CodexDeck
+binds an ephemeral IPv4 loopback listener, pumps bytes between OkHttp's local TCP socket
+and the SSH exec channel, and lets OkHttp perform the HTTP Upgrade, text framing, ping,
+and close handling. The resulting transport still satisfies the normal JSONL transport
+interface above the WebSocket boundary.
+
+The bridge is process-local on Android and requires no helper deployment on the server.
+It does not create another Runtime. This allows a phone and a PC TUI using the same Unix
+user and `CODEX_HOME` to observe or control the same loaded Threads.
 
 ### Isolated stdio launch
 
@@ -161,8 +166,9 @@ is not interpreted as terminal content or JSON-RPC.
 
 - JSON object per newline-terminated line.
 - stdout/stderr separated at the SSH channel.
-- `SSH_EXISTING` pipes stdio to `codex app-server proxy`; `SSH_LAUNCH` starts an
-  isolated `--listen stdio://` process.
+- `SSH_EXISTING` runs `codex app-server proxy`, bridges its raw stdio bytes to a local
+  loopback TCP connection, and performs a WebSocket Upgrade to the daemon control socket.
+- `SSH_LAUNCH` starts an isolated `--listen stdio://` process and uses JSONL directly.
 - Background reader threads push messages into Flow/Channel boundaries.
 - The client supports numeric/string request IDs, concurrent requests, timeouts, server
   requests, notifications, and connection-close propagation.

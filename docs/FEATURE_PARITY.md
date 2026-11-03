@@ -51,7 +51,7 @@ Researched revisions:
 | Capability | Status | Implementation and evidence |
 | --- | --- | --- |
 | Codex app-server JSONL over SSH stdio | Verified | Official `codex-cli 0.166.0` initialize + Thread list passed; loopback SSH test also runs an app-server-shaped fixture. |
-| Existing daemon over SSH (`app-server proxy`) | Implemented | New Host mode runs `codex app-server proxy` instead of launching a runtime; command and SSH channel coverage exist. A real managed-daemon socket E2E remains device/server-environment dependent. |
+| Existing daemon over SSH (`app-server proxy`) | Verified protocol path + Implemented Android bridge | `scripts/check_app_server_proxy.py` passes real WebSocket Upgrade, initialize, and Thread list through `codex-cli 0.166.0 app-server proxy`; the loopback SSH fixture also exercises OkHttp framing through the proxy. Deployment against the user's production daemon and Android device remains pending. |
 | stdout/stderr isolation | Verified | stdout JSONL and stderr diagnostic readers are separate; non-JSON stdout is rejected as protocol data. |
 | JSON-RPC-like request IDs, timeout, concurrent requests | Implemented | Typed numeric/textual IDs preserve the wire type, 30/60 second timeouts, bounded event queue, and protocol tests. |
 | Server notifications and server-initiated requests | Implemented | Item, Turn, Thread, settings, diff, warning, error, approval, user-input, permission, and MCP elicitation handling. |

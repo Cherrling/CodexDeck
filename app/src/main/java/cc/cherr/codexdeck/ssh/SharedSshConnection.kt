@@ -12,6 +12,7 @@ import kotlinx.coroutines.sync.withLock
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.connection.channel.direct.Parameters
+import cc.cherr.codexdeck.transport.WebSocketJsonLineTransport
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.Closeable
@@ -25,6 +26,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
+
+internal interface DiagnosticTransport {
+    val diagnostics: Flow<String>
+}
 
 /** One authenticated route can multiplex app-server exec and interactive PTY channels. */
 class SharedSshConnection internal constructor(
@@ -43,8 +50,42 @@ class SharedSshConnection internal constructor(
      * `codex app-server proxy`. This process is only a byte proxy; it does not start another
      * app-server runtime.
      */
-    fun openExistingAppServer(executable: String): SshJsonLineTransport =
-        openAppServerChannel(appServerProxyCommand(executable))
+    suspend fun openExistingAppServer(
+        executable: String,
+        connectTimeout: Duration = 15.seconds,
+    ): JsonLineTransport {
+        checkOpen()
+        val session = target.startSession()
+        val command = try {
+            session.exec(appServerProxyCommand(executable))
+        } catch (failure: Throwable) {
+            runCatching { session.close() }
+            throw failure
+        }
+        val bridge = try {
+            SshWebSocketBridge(this, command, session, connectTimeout)
+        } catch (failure: Throwable) {
+            runCatching { command.close() }
+            runCatching { session.close() }
+            throw failure
+        }
+        return try {
+            val webSocket = WebSocketJsonLineTransport.connect(
+                url = bridge.webSocketUrl,
+                bearerToken = null,
+                connectTimeout = connectTimeout,
+                headers = bridge.webSocketHeaders,
+            )
+            SshWebSocketJsonLineTransport(webSocket, bridge)
+        } catch (failure: Throwable) {
+            val diagnostic = bridge.awaitDiagnostic()
+            bridge.close()
+            if (diagnostic.isNullOrBlank()) {
+                throw failure
+            }
+            throw IOException("SSH WebSocket bridge failed: $diagnostic", failure)
+        }
+    }
 
     private fun openAppServerChannel(commandText: String): SshJsonLineTransport {
         checkOpen()
@@ -144,7 +185,7 @@ class SshLocalTunnel internal constructor(
 class SshJsonLineTransport internal constructor(
     private val command: Session.Command,
     private val session: Session,
-) : JsonLineTransport {
+) : JsonLineTransport, DiagnosticTransport {
     private val closed = AtomicBoolean()
     private val writeMutex = Mutex()
     private val input = command.inputStream.bufferedReader(Charsets.UTF_8)
@@ -158,7 +199,7 @@ class SshJsonLineTransport internal constructor(
     var onClosed: (() -> Unit)? = null
 
     override val incoming: Flow<String> = lineChannel.receiveAsFlow()
-    val diagnostics: Flow<String> = diagnosticChannel.receiveAsFlow()
+    override val diagnostics: Flow<String> = diagnosticChannel.receiveAsFlow()
 
     init {
         stdoutThread.start()

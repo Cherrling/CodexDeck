@@ -41,10 +41,13 @@ The preferred “existing App Server” Host runs:
 exec '<codex>' app-server proxy --sock "${CODEX_HOME:-$HOME/.codex}/app-server-control/app-server-control.sock"
 ```
 
-`proxy` transparently bridges these JSONL bytes to the running local Unix control
-socket. It preserves request IDs and notification framing, but does not create a second
-runtime. A separate `--listen stdio://` process remains available for an intentionally
-isolated Thread environment.
+`proxy` exposes the raw bytes of the running local Unix control socket. That control
+socket is a WebSocket endpoint, so it is not valid to write JSONL directly into the
+proxy. CodexDeck bridges the proxy stdio channel to an ephemeral loopback TCP connection
+and sends a standard WebSocket Upgrade for `/rpc`; JSON-RPC requests are then carried as
+WebSocket text frames. The proxy does not create a second runtime, and no server-side
+bridge is required. A separate `--listen stdio://` process remains available for an
+intentionally isolated Thread environment.
 
 ### WebSocket
 
