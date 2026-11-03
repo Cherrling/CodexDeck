@@ -88,7 +88,7 @@ Researched revisions:
 | Streaming Agent text | Implemented | 40 ms coalesced append with 524,288-character bound per field. |
 | Reasoning state | Implemented | Summary/text deltas retained separately and editable reasoning cards. |
 | Plan mode and plan updates | Implemented | Experimental collaboration mode payload plus Plan item and `turn/plan/updated` rendering. |
-| Command execution events and output | Implemented | Command cards, bounded output deltas, terminal stdin interaction, status, and exit code. |
+| Command execution events and output | Implemented | Command cards default to one summary row with status/exit code; full command and output are composed only after expansion. Bounded output deltas and terminal stdin interaction remain supported. |
 | File changes and Turn aggregate diff | Implemented | File update patches, item diffs, and `turn/diff/updated`; expandable diff rendering. |
 | Tool and MCP call cards | Implemented | MCP/dynamic tool arguments, result/error, and collaboration Agent state render from protocol items. |
 | Subagent/collaboration events | Partial | Current item types are rendered; deep per-subagent drill-down and lifecycle filtering are limited by what the server exposes. |

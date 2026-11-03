@@ -248,6 +248,9 @@ Thread's visible timeline.
 - Current paginated Threads avoid transferring full rollout history. The app-server may
   still replay an older rollout internally to build a legacy history page, so server CPU
   cost cannot be inferred solely from the small Android response.
+- Command execution items default to a single summary row. Their full command and output
+  are not composed into the LazyColumn until that item is explicitly expanded, so a Turn
+  with many successful commands remains navigable without changing the event history.
 - LazyColumn keys are stable by Turn/item ID.
 - Database I/O and Base64 image file reads run off the main thread.
 - Message attachment limits are four images, 5 MiB per image, and 12 MiB of encoded data

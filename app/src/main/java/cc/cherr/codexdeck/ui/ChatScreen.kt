@@ -7,6 +7,7 @@ import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.verticalScroll
@@ -829,26 +830,78 @@ private fun ReasoningCard(item: ThreadItem) {
 
 @Composable
 private fun CommandCard(item: ThreadItem) {
+    var expanded by remember(item.id) { mutableStateOf(false) }
     val command = item.raw["command"]?.stringValue().orEmpty()
     val output = item.raw["aggregatedOutput"]?.stringValue().orEmpty()
     val exitCode = item.raw["exitCode"]?.let {
         runCatching { it.jsonPrimitive.intOrNull }.getOrNull()
     }
     val status = item.status.ifBlank { item.raw["status"]?.stringValue().orEmpty() }
+    val statusLabel = commandExecutionStatusLabel(status)
+    val summary = remember(command) { commandExecutionSummary(command) }
     ItemShell(
-        title = "Command · $status" + (exitCode?.let { " · exit $it" } ?: ""),
+        title = "Command · $statusLabel" + (exitCode?.let { " · exit $it" } ?: ""),
         accent = if (status == "failed" || (exitCode != null && exitCode != 0)) {
             MaterialTheme.colorScheme.error
         } else {
             Color(0xFF79C7FF)
         },
     ) {
-        CodeBlock(command)
-        if (output.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
-            CodeBlock(output)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Text(
+                if (expanded) "▾" else "▸",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                summary,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontFamily = FontFamily.Monospace,
+                ),
+            )
+            if (output.isNotBlank()) {
+                Text(
+                    if (expanded) "收起" else "查看输出",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+        if (expanded) {
+            Spacer(Modifier.height(4.dp))
+            CodeBlock(command)
+            if (output.isNotBlank()) {
+                Spacer(Modifier.height(6.dp))
+                CodeBlock(output)
+            }
         }
     }
+}
+
+internal fun commandExecutionSummary(command: String): String =
+    command.lineSequence()
+        .firstOrNull { it.isNotBlank() }
+        ?.trim()
+        ?.take(180)
+        .orEmpty()
+        .ifBlank { "（无命令文本）" }
+
+internal fun commandExecutionStatusLabel(status: String): String = when (status) {
+    "inProgress" -> "运行中"
+    "completed" -> "完成"
+    "failed" -> "失败"
+    "declined" -> "已拒绝"
+    "interrupted" -> "已中断"
+    else -> status.ifBlank { "命令" }
 }
 
 @Composable

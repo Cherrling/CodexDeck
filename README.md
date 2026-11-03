@@ -39,6 +39,8 @@ published `SHA256SUMS`.
 - Streaming Agent/Reasoning/Plan/command events, Markdown/code fences, command output,
   file changes/aggregate Turn diffs, tool calls, collaboration/Subagent state, and
   approvals that disappear when another connected client resolves them.
+- Command execution cards are collapsed by default to one command/status row; full
+  command and output content is composed only after the user taps to expand.
 - Model, Reasoning Effort, Approval Policy, one effective permission selector
   (Permission Profile with legacy Sandbox fallback), Plan mode,
   turn steering, interruption, image attachments, and inline working-tree Review.
