@@ -255,9 +255,14 @@ Thread's visible timeline.
 - Current paginated Threads avoid transferring full rollout history. The app-server may
   still replay an older rollout internally to build a legacy history page, so server CPU
   cost cannot be inferred solely from the small Android response.
-- Command execution items default to a single summary row. Their full command and output
-  are not composed into the LazyColumn until that item is explicitly expanded, so a Turn
-  with many successful commands remains navigable without changing the event history.
+- Reasoning, commands, tools, file changes, search, and subagent activity share one
+  compact process-row anatomy (inspired by DSH Go's interaction hierarchy; its AGPL source
+  and assets are not copied). A completed Turn folds its process into one summary while
+  the final Agent answer remains a normal transcript row. Running, failed, and interrupted
+  Turns stay expanded so active work and failures are not hidden.
+- Collapsed process details are not composed. Expanded command output keeps a bounded tail,
+  and oversized tool/diff payloads are truncated with an explicit marker before Compose
+  text layout, preventing a single long command from blocking the transcript.
 - Agent text is parsed as asynchronous GitHub-Flavored Markdown and rendered with native
   Compose components. `retainState` keeps the previous render visible while a streamed
   message is re-parsed, avoiding a loading flicker after each coalesced delta.

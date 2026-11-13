@@ -6,7 +6,9 @@ import android.provider.OpenableColumns
 import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -60,6 +63,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -68,7 +72,12 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -82,7 +91,6 @@ import cc.cherr.codexdeck.protocol.CapabilitySnapshot
 import cc.cherr.codexdeck.protocol.ApprovalKind
 import cc.cherr.codexdeck.protocol.ApprovalRequest
 import cc.cherr.codexdeck.protocol.ThreadItem
-import cc.cherr.codexdeck.protocol.ThreadTurn
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
@@ -94,8 +102,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -114,7 +120,16 @@ fun ChatScreen(
     var renameVisible by remember { mutableStateOf(false) }
     var archiveVisible by remember { mutableStateOf(false) }
     val thread = state.selectedThread
-    val rows = remember(state.turns) { buildTimelineRows(state.turns) }
+    val expandedProcessTurns = remember(state.selectedThreadId) {
+        mutableStateMapOf<String, Boolean>()
+    }
+    val expandedTurnIds = expandedProcessTurns
+        .filterValues { it }
+        .keys
+        .toSet()
+    val rows = remember(state.turns, expandedTurnIds) {
+        buildTimelineRows(state.turns, expandedTurnIds)
+    }
     val listState = rememberLazyListState()
     var autoFollow by remember { mutableStateOf(true) }
     var historyRequestedDuringDrag by remember(state.selectedThreadId) {
@@ -127,7 +142,7 @@ fun ChatScreen(
     }
     val scrollScope = rememberCoroutineScope()
 
-    LaunchedEffect(rows) {
+    LaunchedEffect(state.turns) {
         if (rows.isNotEmpty() && autoFollow) {
             listState.scrollToItem(rows.lastIndex)
         }
@@ -299,8 +314,20 @@ fun ChatScreen(
                             key = { index -> rows[index].key },
                         ) { index ->
                             when (val row = rows[index]) {
-                                is TimelineRow.TurnHeader -> TurnHeader(row.turn)
-                                is TimelineRow.Entry -> ItemCard(row.item, row.turnStatus)
+                                is TimelineRow.Message -> {
+                                    when (row.role) {
+                                        TimelineMessageRole.USER -> UserMessageCard(row.item)
+                                        TimelineMessageRole.ANSWER -> AgentMessageCard(row.item)
+                                    }
+                                }
+                                is TimelineRow.TurnSummary -> TurnProcessSummary(
+                                    row = row,
+                                    onToggle = {
+                                        expandedProcessTurns[row.turn.id] = !row.expanded
+                                    },
+                                )
+                                is TimelineRow.ProcessEntry -> ItemCard(row.item, row.turnStatus)
+                                is TimelineRow.TurnDiff -> TurnDiffRow(row.diff)
                             }
                         }
                     }
@@ -694,64 +721,78 @@ private fun Composer(state: AppState, controller: AppController) {
     }
 }
 
-private sealed interface TimelineRow {
-    val key: String
-
-    data class TurnHeader(val turn: ThreadTurn) : TimelineRow {
-        override val key: String = "turn:${turn.id}"
-    }
-
-    data class Entry(
-        val item: ThreadItem,
-        val turnStatus: String,
-    ) : TimelineRow {
-        override val key: String = "item:${item.id}"
-    }
+private enum class ProcessGlyphType {
+    THINKING,
+    TERMINAL,
+    EDIT,
+    FILE,
+    TOOL,
+    AGENT,
+    WEB,
+    PLAN,
+    MESSAGE,
+    INFO,
+    CHECK,
+    ERROR,
+    SPINNER,
 }
 
-private fun buildTimelineRows(turns: List<ThreadTurn>): List<TimelineRow> =
-    turns.flatMap { turn ->
-        buildList {
-            add(TimelineRow.TurnHeader(turn))
-            turn.items.forEach { add(TimelineRow.Entry(it, turn.status)) }
-        }
-    }
-
 @Composable
-private fun TurnHeader(turn: ThreadTurn) {
-    var showDiff by remember(turn.id) { mutableStateOf(false) }
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(top = 10.dp, start = 4.dp, end = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                when (turn.status) {
-                    "inProgress" -> "运行中"
-                    "completed" -> "完成"
-                    "failed" -> "失败"
-                    "interrupted" -> "已中断"
-                    else -> turn.status
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.width(8.dp))
-            HorizontalDivider(Modifier.weight(1f))
-        }
+private fun TurnProcessSummary(
+    row: TimelineRow.TurnSummary,
+    onToggle: () -> Unit,
+) {
+    val turn = row.turn
+    val failed = turn.status == "failed"
+    val active = turn.status == "inProgress"
+    val canToggle = turn.status == "completed" && row.hasDetails
+    val accent = when {
+        failed -> MaterialTheme.colorScheme.error
+        active -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Column(Modifier.fillMaxWidth()) {
+        ProcessRowFrame(
+            glyph = when {
+                active -> ProcessGlyphType.SPINNER
+                failed -> ProcessGlyphType.ERROR
+                turn.status == "interrupted" -> ProcessGlyphType.INFO
+                else -> ProcessGlyphType.CHECK
+            },
+            title = turnSummaryLabel(turn.status, row.stats),
+            titleColor = if (active || failed) accent else MaterialTheme.colorScheme.onSurface,
+            accent = accent,
+            active = active,
+            expanded = if (canToggle) row.expanded else null,
+            emphasized = true,
+            showRail = false,
+            onClick = if (canToggle) onToggle else null,
+        )
         turn.error?.message?.takeIf(String::isNotBlank)?.let { message ->
             Text(
                 message,
+                modifier = Modifier.padding(start = 40.dp, end = 8.dp, bottom = 6.dp),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
         }
-        turn.raw["diff"]?.stringValue()?.takeIf(String::isNotBlank)?.let { diff ->
-            TextButton(onClick = { showDiff = !showDiff }) {
-                Text(if (showDiff) "收起 Turn Diff" else "查看 Turn Diff")
-            }
-            if (showDiff) CodeBlock(diff)
-        }
+    }
+}
+
+@Composable
+private fun TurnDiffRow(diff: String) {
+    var expanded by remember(diff) { mutableStateOf(false) }
+    val files = remember(diff) {
+        diff.lineSequence().count { it.startsWith("diff --git ") }.coerceAtLeast(1)
+    }
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.EDIT,
+        title = "本轮变更",
+        summary = "$files 个文件",
+        expanded = expanded,
+        onClick = { expanded = !expanded },
+    ) {
+        CodeBlock(boundedProcessText(diff, maxChars = 48_000))
     }
 }
 
@@ -759,42 +800,22 @@ private fun TurnHeader(turn: ThreadTurn) {
 private fun ItemCard(item: ThreadItem, turnStatus: String) {
     when (item.type) {
         "userMessage" -> UserMessageCard(item)
-        "agentMessage" -> AgentMessageCard(item)
-        "reasoning" -> ReasoningCard(item, turnStatus)
-        "plan" -> GenericCard("Plan", item.text, Color(0xFF8FB8FF))
-        "commandExecution" -> CommandCard(item)
-        "fileChange" -> FileChangeCard(item)
-        "mcpToolCall", "dynamicToolCall" -> ToolCard(item)
-        "functionCallOutput" -> GenericCard(
-            "Tool output · ${item.raw["name"]?.stringValue().orEmpty()}",
-            item.raw["output"]?.pretty().orEmpty(),
-            MaterialTheme.colorScheme.tertiary,
-        )
-        "collabAgentToolCall" -> CollaborationCard(item)
-        "subAgentActivity" -> GenericCard(
-            "Subagent · ${item.raw["kind"]?.stringValue().orEmpty()}",
-            item.raw.toString(),
-            Color(0xFFBAA7FF),
-        )
-        "webSearch" -> GenericCard(
-            "Web search",
-            item.raw["query"]?.stringValue().orEmpty(),
-            Color(0xFF79C7FF),
-        )
-        "imageView" -> GenericCard(
-            "Image",
-            item.raw["path"]?.stringValue().orEmpty(),
-            MaterialTheme.colorScheme.tertiary,
-        )
-        "enteredReviewMode", "exitedReviewMode" -> GenericCard(
-            "Code Review",
-            item.raw["review"]?.stringValue().orEmpty(),
-            Color(0xFFB9D47E),
-        )
-        "contextCompaction" -> GenericCard(
-            "Context compacted",
-            "历史上下文已压缩",
-            MaterialTheme.colorScheme.outline,
+        "agentMessage" -> IntermediateAgentMessageRow(item)
+        "reasoning" -> ReasoningRow(item, turnStatus)
+        "plan" -> PlanRow(item)
+        "commandExecution" -> CommandRow(item, turnStatus)
+        "fileChange" -> FileChangeRow(item)
+        "mcpToolCall", "dynamicToolCall" -> ToolRow(item, turnStatus)
+        "functionCallOutput" -> FunctionOutputRow(item)
+        "collabAgentToolCall" -> CollaborationRow(item, turnStatus)
+        "subAgentActivity" -> SubagentActivityRow(item)
+        "webSearch" -> WebSearchRow(item)
+        "imageView" -> ImageViewRow(item)
+        "enteredReviewMode", "exitedReviewMode" -> ReviewModeRow(item)
+        "contextCompaction" -> SimpleProcessRow(
+            glyph = ProcessGlyphType.INFO,
+            title = "上下文已压缩",
+            summary = "历史已整理为可继续使用的上下文",
         )
         else -> ExpandableUnknownItem(item)
     }
@@ -832,102 +853,137 @@ private fun AgentMessageCard(item: ThreadItem) {
 }
 
 @Composable
-private fun ReasoningCard(item: ThreadItem, turnStatus: String) {
-    var expanded by remember(item.id) { mutableStateOf(false) }
-    val finalParts = arrayStrings(item.raw["summary"]) + arrayStrings(item.raw["content"])
-    val streamedParts = listOfNotNull(
-        item.raw["reasoningSummary"]?.stringValue(),
-        item.raw["reasoningText"]?.stringValue(),
-    )
-    val summary = finalParts
-        .takeIf { parts -> parts.any(String::isNotBlank) }
-        ?: streamedParts
-    val summaryText = summary
-        .filter(String::isNotBlank)
-        .joinToString("\n\n")
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer,
+private fun ReasoningRow(item: ThreadItem, turnStatus: String) {
+    var expandedOverride by remember(item.id) { mutableStateOf<Boolean?>(null) }
+    val text = remember(item.raw) { reasoningTextOf(item) }
+    val preview = remember(text) { reasoningPreview(text) }
+    val active = item.status == "inProgress" ||
+        (item.status.isBlank() && turnStatus == "inProgress")
+    val expanded = expandedOverride ?: active
+    val label = if (active) "思考中" else "思考"
+    val summary = when {
+        preview.isNotBlank() -> preview
+        active -> null
+        else -> "提供方未返回思考内容"
+    }
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.THINKING,
+        title = label,
+        summary = summary,
+        accent = MaterialTheme.colorScheme.primary,
+        active = active,
+        expanded = expanded,
+        onClick = { expandedOverride = !expanded },
     ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-            TextButton(onClick = { expanded = !expanded }) {
-                Text(if (expanded) "收起 reasoning" else "查看 reasoning")
-            }
-            if (expanded) {
-                SelectionContainer {
-                    Text(
-                        summaryText.ifBlank {
-                            if (turnStatus == "inProgress") {
-                                "正在推理；摘要会在服务端返回后显示。"
-                            } else {
-                                "本次推理已结束，但模型或第三方提供商没有返回 reasoning 摘要。"
-                            }
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+        when {
+            active -> ReasoningLiveWindow(text)
+            text.isBlank() -> Text(
+                "本次思考已结束，但模型或第三方提供商没有返回可见内容。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            else -> MarkdownContent(
+                text = text,
+                modifier = Modifier.fillMaxWidth(),
+                compact = true,
+            )
         }
     }
 }
 
 @Composable
-private fun CommandCard(item: ThreadItem) {
+private fun ReasoningLiveWindow(text: String) {
+    val visible = remember(text) { streamingReasoningTail(text) }
+    Text(
+        visible.ifBlank { "正在思考…" },
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 52.dp)
+            .padding(top = 2.dp, bottom = 6.dp),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 3,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+@Composable
+private fun PlanRow(item: ThreadItem) {
     var expanded by remember(item.id) { mutableStateOf(false) }
+    val text = item.text
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.PLAN,
+        title = "计划",
+        summary = reasoningPreview(text).ifBlank { "查看当前执行计划" },
+        expanded = expanded,
+        onClick = { expanded = !expanded },
+    ) {
+        if (text.isBlank()) {
+            Text("服务端尚未返回计划内容。")
+        } else {
+            MarkdownContent(text = text, compact = true)
+        }
+    }
+}
+
+@Composable
+private fun IntermediateAgentMessageRow(item: ThreadItem) {
+    var expanded by remember(item.id) { mutableStateOf(false) }
+    val text = item.text.ifBlank { item.raw["text"]?.stringValue().orEmpty() }
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.MESSAGE,
+        title = "消息",
+        summary = reasoningPreview(text).ifBlank { "过程消息" },
+        expanded = expanded,
+        onClick = { expanded = !expanded },
+    ) {
+        MarkdownContent(text = text.ifBlank { "—" }, compact = true)
+    }
+}
+
+@Composable
+private fun CommandRow(item: ThreadItem, turnStatus: String) {
+    var expandedOverride by remember(item.id) { mutableStateOf<Boolean?>(null) }
     val command = item.raw["command"]?.stringValue().orEmpty()
     val output = item.raw["aggregatedOutput"]?.stringValue().orEmpty()
     val exitCode = item.raw["exitCode"]?.let {
         runCatching { it.jsonPrimitive.intOrNull }.getOrNull()
     }
     val status = item.status.ifBlank { item.raw["status"]?.stringValue().orEmpty() }
-    val statusLabel = commandExecutionStatusLabel(status)
+    val failed = status == "failed" || status == "declined" ||
+        (exitCode != null && exitCode != 0)
+    val active = status == "inProgress" ||
+        (status.isBlank() && turnStatus == "inProgress")
+    val expanded = expandedOverride ?: failed
     val summary = remember(command) { commandExecutionSummary(command) }
-    ItemShell(
-        title = "Command · $statusLabel" + (exitCode?.let { " · exit $it" } ?: ""),
-        accent = if (status == "failed" || (exitCode != null && exitCode != 0)) {
-            MaterialTheme.colorScheme.error
-        } else {
-            Color(0xFF79C7FF)
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.TERMINAL,
+        title = "运行",
+        summary = summary,
+        accent = if (failed) MaterialTheme.colorScheme.error else Color(0xFF79C7FF),
+        active = active,
+        expanded = expanded,
+        onClick = { expandedOverride = !expanded },
+        trailingText = when {
+            exitCode != null && exitCode != 0 -> "exit $exitCode"
+            failed -> commandExecutionStatusLabel(status)
+            else -> null
         },
+        trailingColor = if (failed) MaterialTheme.colorScheme.error
+        else MaterialTheme.colorScheme.onSurfaceVariant,
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { expanded = !expanded },
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
-        ) {
-            Text(
-                if (expanded) "▾" else "▸",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                summary,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    fontFamily = FontFamily.Monospace,
+        if (command.isNotBlank()) {
+            CodeBlock(boundedProcessText(command, maxChars = 8_000))
+        }
+        if (output.isNotBlank()) {
+            if (command.isNotBlank()) Spacer(Modifier.height(6.dp))
+            CodeBlock(
+                boundedProcessText(
+                    text = output,
+                    maxChars = 32_000,
+                    keepTail = true,
                 ),
             )
-            if (output.isNotBlank()) {
-                Text(
-                    if (expanded) "收起" else "查看输出",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-        }
-        if (expanded) {
-            Spacer(Modifier.height(4.dp))
-            CodeBlock(command)
-            if (output.isNotBlank()) {
-                Spacer(Modifier.height(6.dp))
-                CodeBlock(output)
-            }
         }
     }
 }
@@ -950,71 +1006,236 @@ internal fun commandExecutionStatusLabel(status: String): String = when (status)
 }
 
 @Composable
-private fun FileChangeCard(item: ThreadItem) {
+private fun FileChangeRow(item: ThreadItem) {
+    var expanded by remember(item.id) { mutableStateOf(false) }
     val changes = (item.raw["changes"] as? JsonArray).orEmpty()
-    ItemShell(
-        title = "File changes · ${changes.size}",
-        accent = Color(0xFFB9D47E),
-    ) {
+    val summary = remember(item.raw) {
+        var added = 0
+        var removed = 0
         changes.forEach { change ->
-            val objectValue = change as? JsonObject ?: return@forEach
+            val diff = (change as? JsonObject)?.get("diff")?.stringValue().orEmpty()
+            diff.lineSequence().forEach { line ->
+                when {
+                    line.startsWith("+++") || line.startsWith("---") -> Unit
+                    line.startsWith("+") -> added++
+                    line.startsWith("-") -> removed++
+                }
+            }
+        }
+        "${changes.size} 个文件 · +$added −$removed"
+    }
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.EDIT,
+        title = "修改",
+        summary = summary,
+        accent = Color(0xFF9ACD77),
+        active = item.status == "inProgress",
+        expanded = expanded,
+        onClick = { expanded = !expanded },
+        trailingText = commandExecutionStatusLabel(item.status).takeIf {
+            item.status == "failed" || item.status == "declined"
+        },
+        trailingColor = MaterialTheme.colorScheme.error,
+    ) {
+        if (changes.isEmpty()) {
+            Text("服务端未返回文件变更详情。")
+        }
+        changes.forEachIndexed { index, change ->
+            val objectValue = change as? JsonObject ?: return@forEachIndexed
+            if (index > 0) HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text(
-                objectValue["path"]?.stringValue().orEmpty(),
+                objectValue["path"]?.stringValue().orEmpty().ifBlank { "未命名文件" },
                 style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurface,
             )
-            CodeBlock(objectValue["diff"]?.stringValue().orEmpty())
+            Spacer(Modifier.height(5.dp))
+            CodeBlock(
+                boundedProcessText(
+                    objectValue["diff"]?.stringValue().orEmpty(),
+                    maxChars = 36_000,
+                ),
+            )
         }
     }
 }
 
 @Composable
-private fun ToolCard(item: ThreadItem) {
+private fun ToolRow(item: ThreadItem, turnStatus: String) {
+    var expandedOverride by remember(item.id) { mutableStateOf<Boolean?>(null) }
     val server = item.raw["server"]?.stringValue()
     val tool = item.raw["tool"]?.stringValue() ?: item.raw["namespace"]?.stringValue().orEmpty()
-    ItemShell(
-        title = listOfNotNull(server, tool).joinToString(" / ").ifBlank { item.type },
+    val failed = item.status == "failed" || item.status == "declined"
+    val active = item.status == "inProgress" ||
+        (item.status.isBlank() && turnStatus == "inProgress")
+    val expanded = expandedOverride ?: failed
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.TOOL,
+        title = "调用",
+        summary = listOfNotNull(server, tool).joinToString(" / ").ifBlank { item.type },
         accent = MaterialTheme.colorScheme.tertiary,
+        active = active,
+        expanded = expanded,
+        onClick = { expandedOverride = !expanded },
+        trailingText = commandExecutionStatusLabel(item.status).takeIf { failed },
+        trailingColor = MaterialTheme.colorScheme.error,
     ) {
         CodeBlock(
-            buildString {
-                append("arguments:\n")
-                append(item.raw["arguments"]?.pretty().orEmpty())
-                item.raw["result"]?.takeUnless { it is JsonNull }?.let {
-                    append("\n\nresult:\n")
-                    append(it.pretty())
-                }
-                item.raw["error"]?.takeUnless { it is JsonNull }?.let {
-                    append("\n\nerror:\n")
-                    append(it.pretty())
-                }
-            },
+            boundedProcessText(
+                buildString {
+                    append("arguments:\n")
+                    append(item.raw["arguments"]?.pretty().orEmpty())
+                    item.raw["result"]?.takeUnless { it is JsonNull }?.let {
+                        append("\n\nresult:\n")
+                        append(it.pretty())
+                    }
+                    item.raw["error"]?.takeUnless { it is JsonNull }?.let {
+                        append("\n\nerror:\n")
+                        append(it.pretty())
+                    }
+                },
+                maxChars = 40_000,
+            ),
         )
     }
 }
 
 @Composable
-private fun CollaborationCard(item: ThreadItem) {
-    val tool = item.raw["tool"]?.stringValue().orEmpty()
+private fun FunctionOutputRow(item: ThreadItem) {
+    var expanded by remember(item.id) { mutableStateOf(false) }
+    val output = item.raw["output"]?.pretty().orEmpty()
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.TOOL,
+        title = "输出",
+        summary = reasoningPreview(output).ifBlank {
+            item.raw["name"]?.stringValue().orEmpty().ifBlank { "工具输出" }
+        },
+        expanded = expanded,
+        onClick = { expanded = !expanded },
+    ) {
+        CodeBlock(
+            boundedProcessText(
+                text = output,
+                maxChars = 40_000,
+                keepTail = true,
+            ),
+        )
+    }
+}
+
+@Composable
+private fun CollaborationRow(item: ThreadItem, turnStatus: String) {
+    var expanded by remember(item.id) { mutableStateOf(false) }
+    val tool = item.raw["tool"]?.stringValue().orEmpty().ifBlank { "Agent" }
     val states = (item.raw["agentsStates"] as? JsonObject).orEmpty()
-    ItemShell(
-        title = "Agent · $tool · ${item.status}",
+    val active = item.status == "inProgress" ||
+        (item.status.isBlank() && turnStatus == "inProgress")
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.AGENT,
+        title = "子代理",
+        summary = "$tool · ${commandExecutionStatusLabel(item.status)}",
         accent = Color(0xFFBAA7FF),
+        active = active,
+        expanded = expanded,
+        onClick = { expanded = !expanded },
     ) {
         item.raw["prompt"]?.stringValue()?.takeIf(String::isNotBlank)?.let {
-            Text(it, style = MaterialTheme.typography.bodyMedium)
+            SelectionContainer {
+                Text(it, style = MaterialTheme.typography.bodyMedium)
+            }
+            Spacer(Modifier.height(7.dp))
         }
         states.forEach { (agent, value) ->
             val state = value as? JsonObject
             Text(
                 "$agent · ${state?.get("status")?.stringValue().orEmpty()}",
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             state?.get("message")?.stringValue()?.takeIf(String::isNotBlank)?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
+}
+
+@Composable
+private fun SubagentActivityRow(item: ThreadItem) {
+    var expanded by remember(item.id) { mutableStateOf(false) }
+    val kind = item.raw["kind"]?.stringValue().orEmpty().ifBlank { item.status }
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.AGENT,
+        title = "子代理",
+        summary = kind,
+        accent = Color(0xFFBAA7FF),
+        active = item.status == "inProgress",
+        expanded = expanded,
+        onClick = { expanded = !expanded },
+    ) {
+        CodeBlock(boundedProcessText(item.raw.pretty(), maxChars = 32_000))
+    }
+}
+
+@Composable
+private fun WebSearchRow(item: ThreadItem) {
+    var expanded by remember(item.id) { mutableStateOf(false) }
+    val query = item.raw["query"]?.stringValue().orEmpty()
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.WEB,
+        title = "搜索",
+        summary = reasoningPreview(query).ifBlank { "网页搜索" },
+        accent = Color(0xFF79C7FF),
+        expanded = expanded,
+        onClick = { expanded = !expanded },
+    ) {
+        CodeBlock(boundedProcessText(item.raw.pretty(), maxChars = 32_000))
+    }
+}
+
+@Composable
+private fun ImageViewRow(item: ThreadItem) {
+    var expanded by remember(item.id) { mutableStateOf(false) }
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.FILE,
+        title = "图片",
+        summary = item.raw["path"]?.stringValue().orEmpty().ifBlank { "查看图片信息" },
+        expanded = expanded,
+        onClick = { expanded = !expanded },
+    ) {
+        CodeBlock(boundedProcessText(item.raw.pretty(), maxChars = 32_000))
+    }
+}
+
+@Composable
+private fun ReviewModeRow(item: ThreadItem) {
+    var expanded by remember(item.id) { mutableStateOf(false) }
+    val review = item.raw["review"]?.stringValue().orEmpty()
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.CHECK,
+        title = if (item.type == "enteredReviewMode") "代码审查" else "审查结束",
+        summary = reasoningPreview(review).ifBlank { "Code Review" },
+        accent = Color(0xFFB9D47E),
+        expanded = expanded,
+        onClick = { expanded = !expanded },
+    ) {
+        CodeBlock(boundedProcessText(item.raw.pretty(), maxChars = 32_000))
+    }
+}
+
+@Composable
+private fun SimpleProcessRow(
+    glyph: ProcessGlyphType,
+    title: String,
+    summary: String? = null,
+) {
+    ProcessRowFrame(
+        glyph = glyph,
+        title = title,
+        summary = summary,
+    )
 }
 
 @Composable
@@ -1029,11 +1250,314 @@ private fun GenericCard(title: String, text: String, accent: Color) {
 @Composable
 private fun ExpandableUnknownItem(item: ThreadItem) {
     var expanded by remember(item.id) { mutableStateOf(false) }
-    ItemShell(title = "Unsupported item · ${item.type}", accent = MaterialTheme.colorScheme.outline) {
-        TextButton(onClick = { expanded = !expanded }) {
-            Text(if (expanded) "收起原始事件" else "查看原始事件")
+    ProcessRowFrame(
+        glyph = ProcessGlyphType.INFO,
+        title = "其他事件",
+        summary = item.type,
+        expanded = expanded,
+        onClick = { expanded = !expanded },
+    ) {
+        CodeBlock(boundedProcessText(item.raw.pretty(), maxChars = 32_000))
+    }
+}
+
+@Composable
+private fun ProcessRowFrame(
+    glyph: ProcessGlyphType,
+    title: String,
+    summary: String? = null,
+    accent: Color? = null,
+    titleColor: Color? = null,
+    active: Boolean = false,
+    expanded: Boolean? = null,
+    emphasized: Boolean = false,
+    showRail: Boolean = true,
+    trailingText: String? = null,
+    trailingColor: Color? = null,
+    onClick: (() -> Unit)? = null,
+    content: (@Composable () -> Unit)? = null,
+) {
+    val resolvedAccent = accent ?: MaterialTheme.colorScheme.onSurfaceVariant
+    val resolvedTitleColor = titleColor ?: if (emphasized) {
+        MaterialTheme.colorScheme.onSurface
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val railColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .drawBehind {
+                    if (showRail) {
+                        val x = 16.dp.toPx()
+                        drawLine(
+                            color = railColor,
+                            start = androidx.compose.ui.geometry.Offset(x, 0f),
+                            end = androidx.compose.ui.geometry.Offset(x, size.height),
+                            strokeWidth = 1.dp.toPx(),
+                            cap = StrokeCap.Round,
+                        )
+                    }
+                }
+                .clip(RoundedCornerShape(12.dp))
+                .then(
+                    if (onClick != null) {
+                        Modifier.clickable(onClick = onClick)
+                    } else {
+                        Modifier
+                    },
+                )
+                .heightIn(min = 38.dp)
+                .padding(horizontal = 4.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ProcessGlyph(glyph, resolvedAccent)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                title,
+                maxLines = 1,
+                style = if (emphasized) {
+                    MaterialTheme.typography.labelLarge
+                } else {
+                    MaterialTheme.typography.bodyMedium
+                },
+                color = resolvedTitleColor,
+            )
+            if (!summary.isNullOrBlank()) {
+                Text(
+                    "·",
+                    modifier = Modifier.padding(horizontal = 6.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                )
+                Text(
+                    summary,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (resolvedAccent == MaterialTheme.colorScheme.error) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f)
+                    },
+                )
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
+            trailingText?.takeIf(String::isNotBlank)?.let {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    it,
+                    maxLines = 1,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = trailingColor ?: MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (active && glyph != ProcessGlyphType.SPINNER) {
+                Spacer(Modifier.width(8.dp))
+                CircularProgressIndicator(
+                    modifier = Modifier.size(13.dp),
+                    strokeWidth = 1.5.dp,
+                    color = resolvedAccent,
+                )
+            }
+            if (expanded != null) {
+                Icon(
+                    Icons.Default.KeyboardArrowDown,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    modifier = Modifier
+                        .padding(start = 3.dp)
+                        .size(18.dp)
+                        .rotate(if (expanded) 180f else 0f),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                )
+            } else {
+                Spacer(Modifier.width(4.dp))
+            }
         }
-        if (expanded) CodeBlock(item.raw.toString())
+        if (expanded == true && content != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .drawBehind {
+                        val x = 16.dp.toPx()
+                        drawLine(
+                            color = railColor,
+                            start = androidx.compose.ui.geometry.Offset(x, 0f),
+                            end = androidx.compose.ui.geometry.Offset(x, size.height),
+                            strokeWidth = 1.dp.toPx(),
+                            cap = StrokeCap.Round,
+                        )
+                    }
+                    .padding(start = 40.dp, end = 6.dp, top = 2.dp, bottom = 9.dp),
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    content()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProcessGlyph(type: ProcessGlyphType, color: Color) {
+    Box(
+        modifier = Modifier
+            .size(24.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .background(color.copy(alpha = 0.11f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (type == ProcessGlyphType.SPINNER) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                color = color,
+                strokeWidth = 1.5.dp,
+            )
+        } else {
+            Canvas(Modifier.size(14.dp)) {
+                val stroke = 1.45.dp.toPx()
+                val w = size.width
+                val h = size.height
+                fun line(x1: Float, y1: Float, x2: Float, y2: Float) {
+                    drawLine(
+                        color = color,
+                        start = androidx.compose.ui.geometry.Offset(x1 * w, y1 * h),
+                        end = androidx.compose.ui.geometry.Offset(x2 * w, y2 * h),
+                        strokeWidth = stroke,
+                        cap = StrokeCap.Round,
+                    )
+                }
+                when (type) {
+                    ProcessGlyphType.THINKING -> {
+                        drawCircle(color, radius = 2.1.dp.toPx(), center = center)
+                        line(0.5f, 0.02f, 0.5f, 0.2f)
+                        line(0.5f, 0.8f, 0.5f, 0.98f)
+                        line(0.02f, 0.5f, 0.2f, 0.5f)
+                        line(0.8f, 0.5f, 0.98f, 0.5f)
+                    }
+                    ProcessGlyphType.TERMINAL -> {
+                        line(0.12f, 0.23f, 0.4f, 0.5f)
+                        line(0.4f, 0.5f, 0.12f, 0.77f)
+                        line(0.5f, 0.78f, 0.88f, 0.78f)
+                    }
+                    ProcessGlyphType.EDIT -> {
+                        line(0.18f, 0.82f, 0.72f, 0.28f)
+                        line(0.72f, 0.28f, 0.84f, 0.16f)
+                        line(0.18f, 0.82f, 0.34f, 0.77f)
+                    }
+                    ProcessGlyphType.FILE -> {
+                        val path = Path().apply {
+                            moveTo(w * 0.22f, h * 0.08f)
+                            lineTo(w * 0.62f, h * 0.08f)
+                            lineTo(w * 0.82f, h * 0.3f)
+                            lineTo(w * 0.82f, h * 0.9f)
+                            lineTo(w * 0.22f, h * 0.9f)
+                            close()
+                        }
+                        drawPath(
+                            path,
+                            color,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(stroke),
+                        )
+                        line(0.62f, 0.08f, 0.62f, 0.3f)
+                        line(0.62f, 0.3f, 0.82f, 0.3f)
+                    }
+                    ProcessGlyphType.TOOL -> {
+                        drawCircle(
+                            color,
+                            radius = 2.5.dp.toPx(),
+                            center = center,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(stroke),
+                        )
+                        line(0.5f, 0.02f, 0.5f, 0.2f)
+                        line(0.5f, 0.8f, 0.5f, 0.98f)
+                        line(0.02f, 0.5f, 0.2f, 0.5f)
+                        line(0.8f, 0.5f, 0.98f, 0.5f)
+                    }
+                    ProcessGlyphType.AGENT -> {
+                        drawCircle(
+                            color,
+                            radius = 2.2.dp.toPx(),
+                            center = androidx.compose.ui.geometry.Offset(w * 0.34f, h * 0.35f),
+                        )
+                        drawCircle(
+                            color,
+                            radius = 2.2.dp.toPx(),
+                            center = androidx.compose.ui.geometry.Offset(w * 0.66f, h * 0.65f),
+                        )
+                        line(0.44f, 0.43f, 0.58f, 0.58f)
+                    }
+                    ProcessGlyphType.WEB -> {
+                        drawCircle(
+                            color,
+                            radius = w * 0.39f,
+                            center = center,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(stroke),
+                        )
+                        line(0.11f, 0.5f, 0.89f, 0.5f)
+                        line(0.5f, 0.11f, 0.5f, 0.89f)
+                        line(0.25f, 0.22f, 0.75f, 0.22f)
+                        line(0.25f, 0.78f, 0.75f, 0.78f)
+                    }
+                    ProcessGlyphType.PLAN -> {
+                        listOf(0.2f, 0.5f, 0.8f).forEach { y ->
+                            drawCircle(
+                                color,
+                                radius = 1.dp.toPx(),
+                                center = androidx.compose.ui.geometry.Offset(w * 0.12f, h * y),
+                            )
+                            line(0.3f, y, 0.9f, y)
+                        }
+                    }
+                    ProcessGlyphType.MESSAGE -> {
+                        val path = Path().apply {
+                            moveTo(w * 0.1f, h * 0.16f)
+                            lineTo(w * 0.9f, h * 0.16f)
+                            lineTo(w * 0.9f, h * 0.7f)
+                            lineTo(w * 0.48f, h * 0.7f)
+                            lineTo(w * 0.28f, h * 0.9f)
+                            lineTo(w * 0.28f, h * 0.7f)
+                            lineTo(w * 0.1f, h * 0.7f)
+                            close()
+                        }
+                        drawPath(
+                            path,
+                            color,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(stroke),
+                        )
+                    }
+                    ProcessGlyphType.INFO -> {
+                        drawCircle(
+                            color,
+                            radius = w * 0.4f,
+                            center = center,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(stroke),
+                        )
+                        drawCircle(
+                            color,
+                            radius = 1.2.dp.toPx(),
+                            center = androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.32f),
+                        )
+                        line(0.5f, 0.48f, 0.5f, 0.72f)
+                    }
+                    ProcessGlyphType.CHECK -> {
+                        line(0.12f, 0.52f, 0.4f, 0.78f)
+                        line(0.4f, 0.78f, 0.9f, 0.24f)
+                    }
+                    ProcessGlyphType.ERROR -> {
+                        line(0.2f, 0.2f, 0.8f, 0.8f)
+                        line(0.8f, 0.2f, 0.2f, 0.8f)
+                    }
+                    ProcessGlyphType.SPINNER -> Unit
+                }
+            }
+        }
     }
 }
 
@@ -1081,11 +1605,20 @@ private fun CodeBlock(text: String) {
 }
 
 @Composable
-private fun MarkdownContent(text: String, modifier: Modifier = Modifier) {
+private fun MarkdownContent(
+    text: String,
+    modifier: Modifier = Modifier,
+    compact: Boolean = false,
+) {
     val markdownState = rememberMarkdownState(
         content = text,
         retainState = true,
     )
+    val bodyStyle = if (compact) {
+        MaterialTheme.typography.bodyMedium
+    } else {
+        MaterialTheme.typography.bodyLarge
+    }
     SelectionContainer {
         Markdown(
             markdownState = markdownState,
@@ -1104,14 +1637,14 @@ private fun MarkdownContent(text: String, modifier: Modifier = Modifier) {
                 h4 = MaterialTheme.typography.titleLarge,
                 h5 = MaterialTheme.typography.titleMedium,
                 h6 = MaterialTheme.typography.titleSmall,
-                text = MaterialTheme.typography.bodyLarge,
+                text = bodyStyle,
                 code = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                 inlineCode = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                quote = MaterialTheme.typography.bodyLarge,
-                paragraph = MaterialTheme.typography.bodyLarge,
-                ordered = MaterialTheme.typography.bodyLarge,
-                bullet = MaterialTheme.typography.bodyLarge,
-                list = MaterialTheme.typography.bodyLarge,
+                quote = bodyStyle,
+                paragraph = bodyStyle,
+                ordered = bodyStyle,
+                bullet = bodyStyle,
+                list = bodyStyle,
                 table = MaterialTheme.typography.bodyMedium,
             ),
         )
@@ -1283,9 +1816,6 @@ private fun userText(raw: JsonObject): String {
         }
     }.joinToString("\n")
 }
-
-private fun arrayStrings(element: JsonElement?): List<String> =
-    (element as? JsonArray).orEmpty().mapNotNull { it.stringValue() }
 
 private fun JsonElement.stringValue(): String? =
     runCatching { jsonPrimitive.contentOrNull }.getOrNull()

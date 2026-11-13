@@ -88,11 +88,12 @@ Researched revisions:
 | --- | --- | --- |
 | Streaming Agent text | Implemented | 40 ms coalesced append with 524,288-character bound per field. |
 | Chat scroll navigation | Implemented, device-unverified | A jump-to-latest button appears whenever the transcript can scroll down; tapping it restores auto-follow and animates to the latest row. |
-| Reasoning state | Implemented | Summary/text deltas survive the final item upsert, final content takes precedence, and empty completed reasoning is distinguished from an in-progress provider response. |
+| Turn process folding | Implemented, device-unverified | Completed Turns collapse to one summary while the final answer stays outside the process. Running Turns remain visible; failed and interrupted Turns never auto-fold. Process rows use stable LazyColumn keys and are not collapsed into one giant Composable. |
+| Reasoning state | Implemented, device-unverified | Summary/text deltas survive the final item upsert, final content takes precedence, and active reasoning follows the latest text in a bounded three-line window. Completed reasoning collapses to a one-line preview and expands to selectable Markdown. |
 | Plan mode and plan updates | Implemented | Experimental collaboration mode payload plus Plan item and `turn/plan/updated` rendering. |
-| Command execution events and output | Implemented | Command cards default to one summary row with status/exit code; full command and output are composed only after expansion. Bounded output deltas and terminal stdin interaction remain supported. |
-| File changes and Turn aggregate diff | Implemented | File update patches, item diffs, and `turn/diff/updated`; expandable diff rendering. |
-| Tool and MCP call cards | Implemented | MCP/dynamic tool arguments, result/error, and collaboration Agent state render from protocol items. |
+| Command execution events and output | Implemented | Commands render as compact process rows and compose command/output code blocks only after expansion. Failed commands open automatically; large outputs keep a bounded tail. |
+| File changes and Turn aggregate diff | Implemented | File update patches, item diffs, and `turn/diff/updated` share the process timeline; file rows show changed-file and add/delete counts and render bounded diffs on demand. |
+| Tool and MCP call cards | Implemented | MCP/dynamic tool calls, function output, web search, file/image events, and collaboration Agent state share one compact process-row anatomy with expandable details. |
 | Subagent/collaboration events | Partial | Current item types are rendered; deep per-subagent drill-down and lifecycle filtering are limited by what the server exposes. |
 | Basic approvals | Verified | Protocol tests verify exact server request ID echo and command decision payload. |
 | Permission, file, user-input, MCP elicitation approvals | Partial | Payloads and response shapes are implemented; rich typed MCP form rendering and policy race testing remain incomplete. |
